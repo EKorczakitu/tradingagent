@@ -21,14 +21,12 @@ def generate_alpha_pool(input_df):
     # Log Returns (Baseline feature)
     df['log_ret'] = np.log(df['Close'] / df['Close'].shift(1))
     
-    # Fractional Differentiation 
-    #  Aktiver kun hvis du vil teste hukommelse vs. stationaritet. 
-    #  Bemærk: Kræver lang historik og fjerner mange rækker i starten.)
-    df['frac_diff_close'] = frac_diff_ffd(df['Close'], d=0.4, thres=1e-4) 
+    # Fractional Differentiation (Udkommenteret som før)
+    # df['frac_diff_close'] = frac_diff_ffd(df['Close'], d=0.4, thres=1e-3) 
 
     # --- KATEGORI 2: Momentum ---
     
-    # RSI (Relative Strength Index)
+    # RSI
     def calculate_rsi(series, period):
         delta = series.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -40,7 +38,7 @@ def generate_alpha_pool(input_df):
     df['rsi_14'] = calculate_rsi(df['Close'], 14)
     df['rsi_21'] = calculate_rsi(df['Close'], 21)
 
-    # ROC (Rate of Change)
+    # ROC
     n = 10
     df['roc_10'] = ((df['Close'] - df['Close'].shift(n)) / df['Close'].shift(n)) * 100
 
@@ -49,21 +47,20 @@ def generate_alpha_pool(input_df):
     lowest_low = df['Low'].rolling(window=stoch_k_period).min()
     highest_high = df['High'].rolling(window=stoch_k_period).max()
     
-    # Safe division
     denominator = highest_high - lowest_low
     denominator = denominator.replace(0, np.nan) 
     df['stoch_k'] = 100 * ((df['Close'] - lowest_low) / denominator)
     
     # --- KATEGORI 3: Trend ---
     
-    # MACD (Moving Average Convergence Divergence)
+    # MACD
     exp1 = df['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['macd_line'] = exp1 - exp2
     df['macd_signal'] = df['macd_line'].ewm(span=9, adjust=False).mean()
     df['macd_hist'] = df['macd_line'] - df['macd_signal']
 
-    # CCI (Commodity Channel Index)
+    # CCI
     tp = (df['High'] + df['Low'] + df['Close']) / 3
     cci_period = 20
     sma_tp = tp.rolling(window=cci_period).mean()
@@ -72,7 +69,7 @@ def generate_alpha_pool(input_df):
     mean_dev = mean_dev.replace(0, np.nan)
     df['cci'] = (tp - sma_tp) / (0.015 * mean_dev)
 
-    # ADX (Average Directional Index)
+    # ADX
     df['tr1'] = df['High'] - df['Low']
     df['tr2'] = abs(df['High'] - df['Close'].shift(1))
     df['tr3'] = abs(df['Low'] - df['Close'].shift(1))
@@ -97,12 +94,11 @@ def generate_alpha_pool(input_df):
     df['dx'] = 100 * abs(df['plus_di'] - df['minus_di']) / sum_di
     df['adx'] = df['dx'].ewm(alpha=1/adx_period, adjust=False).mean()
 
-    # Oprydning af midlertidige kolonner
+    # Oprydning
     df.drop(columns=['tr1', 'tr2', 'tr3', 'tr', 'up_move', 'down_move', 'plus_dm', 'minus_dm', 'dx'], inplace=True)
 
     # --- KATEGORI 4: Volatility ---
     
-    # ATR Normalized
     df['atr_normalized'] = df['atr'] / df['Close']
 
     # Bollinger Band Width
@@ -120,30 +116,25 @@ def generate_alpha_pool(input_df):
 
     # --- KATEGORI 5: Volume & Microstructure ---
     
-    # OBV (On-Balance Volume)
+    # OBV
     df['obv'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
 
-    # Rolling VWAP (24 Timer)
-    # Bruger rullende vindue for at sikre tilpasning til nye regimer og undgå 0-division i fil-start
+    # Rolling VWAP (24 Timer) - Omdøbt for klarhed
     vwap_window = 24 
     vwap_tp = (df['High'] + df['Low'] + df['Close']) / 3
     
     v_cum = df['Volume'].rolling(window=vwap_window).sum()
     pv_cum = (vwap_tp * df['Volume']).rolling(window=vwap_window).sum()
     
-    # Sæt 0 volumen til NaN for at undgå division med 0 (uendelig)
     v_cum = v_cum.replace(0, np.nan)
     
-    df['vwap'] = pv_cum / v_cum
+    df['rolling_vwap_24h'] = pv_cum / v_cum
     
-    # Distance to VWAP (Featuren vi faktisk bruger)
-    df['dist_to_vwap'] = (df['Close'] - df['vwap']) / df['vwap']
+    # Distance to VWAP
+    df['dist_to_vwap'] = (df['Close'] - df['rolling_vwap_24h']) / df['rolling_vwap_24h']
 
     # --- RENSNING ---
-    # Erstat uendelige værdier med NaN
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    
-    # Fjern alle rækker der indeholder NaN (f.eks. starten af filen eller nattetimer uden volumen)
     df.dropna(inplace=True)
 
     return df
@@ -151,12 +142,25 @@ def generate_alpha_pool(input_df):
 def normalize_features(input_df):
     """
     Standardiserer features (Z-score normalization).
-    Returnerer den skalerede dataframe samt scaler-objektet.
+    Bruger 'Clipping' for at håndtere outliers i stedet for at slette rækker.
     """
     df = input_df.copy()
     
-    # Sikkerhedsnet mod uendelige værdier
+    # Håndter uendelige værdier ved at erstatte med NaN først
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    
+    # 1. Clipping (Winsorization) - Fix for "Inf/Outlier" feedback
+    # Vi sætter en grænse ved 0.1% og 99.9% fraktilen for at fjerne ekstreme outliers
+    # der kan ødelægge træningen, uden at slette data.
+    # Vi beregner quantiles kun på numeriske kolonner
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    
+    # Clip værdierne
+    lower = df[numeric_cols].quantile(0.001)
+    upper = df[numeric_cols].quantile(0.999)
+    df[numeric_cols] = df[numeric_cols].clip(lower=lower, upper=upper, axis=1)
+    
+    # 2. Fjern eventuelle resterende NaNs (burde være få efter clipping)
     df.dropna(inplace=True)
     
     scaler = StandardScaler()
@@ -164,12 +168,11 @@ def normalize_features(input_df):
     # Fit og transform
     df_scaled_array = scaler.fit_transform(df)
     
-    # Bevar kolonnenavne og indeks
     df_scaled = pd.DataFrame(df_scaled_array, columns=df.columns, index=df.index)
     
     return df_scaled, scaler
 
-# --- HJÆLPEFUNKTIONER (FRACTIONAL DIFFERENTIATION) ---
+# Hjælpefunktioner til FracDiff (uændret)
 def get_weights_ffd(d, thres):
     w, k = [1.], 1
     while True:

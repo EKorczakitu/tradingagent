@@ -4,62 +4,104 @@ import features
 import feature_selection
 
 def run_pipeline():
-    print("--- Starter Pipeline ---")
+    print("--- Starter Pipeline (Institutional Grade) ---")
 
     # 1. INDLÆS DATA
     print("\n--- TRIN 1: Indlæser Data ---")
     df_train, df_val, df_test = dataloading.get_novo_nordisk_split()
     
-    print(f"Train size: {df_train.shape}")
-    print(f"Val size:   {df_val.shape}")
-    print(f"Test size:  {df_test.shape}")
+    print(f"Original Train size: {df_train.shape}")
+    print(f"Original Val size:   {df_val.shape}")
+    print(f"Original Test size:  {df_test.shape}")
 
-    # 2. GENERER FEATURES (Alpha Pool)
-    # Vi skal gøre dette separat for hvert datasæt for at sikre, at features 
-    # som rolling windows er korrekte (selvom man mister de første par rækker i hvert sæt).
-    print("\n--- TRIN 2: Genererer Alpha Pool ---")
+    # 2. GENERER FEATURES (Med "Warm-Up" Buffer)
+    print("\n--- TRIN 2: Genererer Alpha Pool med Warm-Up ---")
+    
+    # Hvor meget historik skal indikatorer bruge? (MACD bruger 26+9, så 100 er rigeligt sikkert)
+    WARMUP_ROWS = 100 
+    
+    # --- Train Processing ---
+    # Train starter fra scratch (accepterer koldt start tab i begyndelsen af 2016)
     train_processed = features.generate_alpha_pool(df_train)
-    val_processed   = features.generate_alpha_pool(df_val)
-    test_processed  = features.generate_alpha_pool(df_test)
+    
+    # --- Validation Processing (Fix for "Cold Start") ---
+    # Tag slutningen af Train og sæt foran Val
+    if len(df_train) >= WARMUP_ROWS:
+        warmup_data = df_train.iloc[-WARMUP_ROWS:].copy()
+        val_with_warmup = pd.concat([warmup_data, df_val])
+    else:
+        val_with_warmup = df_val # Fallback hvis train er for lille
+        
+    val_processed_full = features.generate_alpha_pool(val_with_warmup)
+    
+    # Fjern warm-up rækkerne igen (så vi kun har Val data tilbage)
+    # Vi finder indekset hvor Val faktisk starter
+    val_start_time = df_val.index[0]
+    val_processed = val_processed_full[val_processed_full.index >= val_start_time].copy()
+    
+    # --- Test Processing (Fix for "Cold Start") ---
+    # Tag slutningen af Val og sæt foran Test
+    if len(df_val) >= WARMUP_ROWS:
+        warmup_data_test = df_val.iloc[-WARMUP_ROWS:].copy()
+        test_with_warmup = pd.concat([warmup_data_test, df_test])
+    else:
+        test_with_warmup = df_test
+        
+    test_processed_full = features.generate_alpha_pool(test_with_warmup)
+    
+    test_start_time = df_test.index[0]
+    test_processed = test_processed_full[test_processed_full.index >= test_start_time].copy()
+
+    print(f"Processed Train: {train_processed.shape}")
+    print(f"Processed Val:   {val_processed.shape} (Ingen tab i starten!)")
+    print(f"Processed Test:  {test_processed.shape} (Ingen tab i starten!)")
 
     # 3. NORMALISERING (Vigtigt: Fit på Train, Transform på alle)
-    print("\n--- TRIN 3: Normalisering ---")
-    # Vi bruger funktionen fra features.py, men vi skal ændre lidt i logikken, fordi vi nu har 3 sæt. 
-    # Jeg antager her, at du har normalize_features i features.py.
-    # Vi kalder den for at få scaleren baseret på Train.
+    print("\n--- TRIN 3: Normalisering (Med Outlier Clipping) ---")
     
+    # Fit scaler på Train
     train_scaled, scaler = features.normalize_features(train_processed)
     
-    # Nu bruger vi den SAMME scaler til val og test manuelt for at undgå data leakage
-    # Vi skal håndtere NaN/Inf først som i din funktion
-    val_processed.replace([float('inf'), float('-inf')], pd.NA, inplace=True)
-    val_processed.dropna(inplace=True)
-    test_processed.replace([float('inf'), float('-inf')], pd.NA, inplace=True)
-    test_processed.dropna(inplace=True)
-
-    # Transform (brug scaler.transform, som returnerer numpy array, så vi laver det til DF igen)
-    val_scaled_array = scaler.transform(val_processed)
-    val_scaled = pd.DataFrame(val_scaled_array, columns=val_processed.columns, index=val_processed.index)
-
-    test_scaled_array = scaler.transform(test_processed)
-    test_scaled = pd.DataFrame(test_scaled_array, columns=test_processed.columns, index=test_processed.index)
+    # Transform Val og Test med samme scaler
+    # Note: Vi bruger scaler.transform direkte. normalize_features funktionen bruges kun til at fitte.
+    # Vi skal dog stadig håndtere inf/nan og clipping på val/test manuelt eller via en helper
+    # For at gøre det rent, genbruger vi logikken fra normalize_features men uden fit
     
-    print("Normalisering færdig baseret på Træningssættets statistik.")
+    def apply_transform(df_in, scaler_obj, clip_lower, clip_upper):
+        df = df_in.copy()
+        df.replace([float('inf'), float('-inf')], pd.NA, inplace=True)
+        numeric_cols = df.select_dtypes(include=[float, int]).columns
+        # Apply clipping limits from train
+        df[numeric_cols] = df[numeric_cols].clip(lower=clip_lower, upper=clip_upper, axis=1)
+        df.dropna(inplace=True)
+        
+        scaled_array = scaler_obj.transform(df)
+        return pd.DataFrame(scaled_array, columns=df.columns, index=df.index)
+
+    # Hent clipping grænser fra Train (vi genberegner dem her for at have dem til apply_transform)
+    # (Ideelt set skulle normalize_features returnere disse, men vi gør det her for at holde features.py simpel)
+    numeric_cols = train_processed.select_dtypes(include=[float, int]).columns
+    train_lower = train_processed[numeric_cols].quantile(0.001)
+    train_upper = train_processed[numeric_cols].quantile(0.999)
+
+    val_scaled = apply_transform(val_processed, scaler, train_lower, train_upper)
+    test_scaled = apply_transform(test_processed, scaler, train_lower, train_upper)
+    
+    print("Normalisering færdig.")
 
     # 4. FEATURE SELECTION (The Funnel)
     print("\n--- TRIN 4: Feature Selection (Funnel) ---")
-    # Vi kører feature selection på Træningssættet for at finde de bedste kolonner
+    
     train_final, dropped_log = feature_selection.feature_selection_funnel(
         train_scaled, 
         method='xgboost', 
         top_k_features=20
     )
 
-    # Hvilke kolonner blev valgt?
     selected_columns = train_final.columns.tolist()
     print(f"\nValgte features ({len(selected_columns)}): {selected_columns}")
 
-    # Filtrer Validation og Test sæt så de har PRÆCIS de samme kolonner
+    # Filtrer Validation og Test
     val_final = val_scaled[selected_columns]
     test_final = test_scaled[selected_columns]
 
@@ -69,11 +111,11 @@ def run_pipeline():
     print(f"Val:   {val_final.shape}")
     print(f"Test:  {test_final.shape}")
     
-    # Gem de processerede data til CSV, så vi ikke skal køre det hele igen
+    # Gem til CSV
     train_final.to_csv('data/processed_train.csv')
     val_final.to_csv('data/processed_val.csv')
     test_final.to_csv('data/processed_test.csv')
-
+    
     return train_final, val_final, test_final
 
 if __name__ == "__main__":
