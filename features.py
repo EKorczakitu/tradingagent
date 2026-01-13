@@ -34,7 +34,7 @@ def generate_alpha_pool(input_df):
             k += 1
         return np.array(w[::-1]).reshape(-1, 1)
 
-    def frac_diff_ffd(series, d, thres=1e-5):
+    def frac_diff_ffd(series, d, thres=1e-3):
         # Håndterer manglende data før beregning
         series = series.dropna()
         w = get_weights_ffd(d, thres)
@@ -182,8 +182,3 @@ def normalize_features(input_df):
     df_scaled = pd.DataFrame(df_scaled_array, columns=df.columns, index=df.index)
     
     return df_scaled, scaler
-
-
-
-df_processed = generate_alpha_pool(df)
-df_normalized, scaler_model = normalize_features(df_processed)

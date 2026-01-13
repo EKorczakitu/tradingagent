@@ -94,7 +94,7 @@ def feature_selection_funnel(input_df, method='xgboost', n_components_pca=0.95, 
         X = df.iloc[:-1]
         y = target.iloc[:-1]
         
-        model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss')
+        model = xgb.XGBClassifier(eval_metric='logloss')
         model.fit(X, y)
         
         # Hent feature importance
@@ -109,6 +109,3 @@ def feature_selection_funnel(input_df, method='xgboost', n_components_pca=0.95, 
         print(feature_imp.head(top_k_features))
         
     return final_df, dropped_log
-
-# Vælg metode: 'xgboost' (anbefalet for læsbarhed) eller 'pca' (for støjreduktion)
-df_final, log = feature_selection_funnel(df_normalized, method='xgboost', top_k_features=20)
