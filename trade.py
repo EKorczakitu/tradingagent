@@ -56,8 +56,8 @@ def train():
     )
     
     # 4. Start Træning (Lang tid nu!)
-    # Vi giver den 1.000.000 steps nu, da vi ved, at "hjernen" er indstillet korrekt.
-    TRAIN_STEPS = 1000000 
+    # Vi giver den 5.000.000 steps nu, da vi ved, at "hjernen" er indstillet korrekt.
+    TRAIN_STEPS = 5_000_000 
     print(f"--- Starter Endelig Træning ({TRAIN_STEPS} steps) ---")
     
     model.learn(total_timesteps=TRAIN_STEPS, progress_bar=True)
