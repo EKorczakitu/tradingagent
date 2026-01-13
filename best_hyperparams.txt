@@ -1,1 +1,1 @@
-{'learning_rate': 5.040538599733297e-05, 'ent_coef': 0.0021105964270225898, 'batch_size': 128, 'n_steps': 2048, 'net_arch': 'large'}
+{'learning_rate': 0.000253751204879063, 'ent_coef': 0.00026784355475329216, 'batch_size': 64, 'n_steps': 1024, 'net_arch': 'small'}

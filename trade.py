@@ -1,11 +1,10 @@
 import pandas as pd
 import os
-import torch.nn as nn # Vigtig for at kunne bruge Tanh aktivering
+import torch.nn as nn
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
-from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
+from stable_baselines3.common.utils import set_random_seed
 
-# Importér vores egne moduler
 import dataloading
 from trading_env import TradingEnv
 
@@ -22,50 +21,47 @@ def load_and_align_data():
     df_raw_aligned = df_raw_train.loc[df_features_train.index]
     return df_features_train, df_raw_aligned
 
+# Wrapper function for multiprocessing
+def make_env(rank, df_features, df_raw, spread=0.0002):
+    def _init():
+        env = TradingEnv(df_features, df_raw, spread=spread)
+        return env
+    return _init
+
 def train():
-    # 1. Gør data klar
     df_features, df_raw = load_and_align_data()
     
-    # 2. Opret Miljøet
-    print("--- Starter Miljø ---")
-    env = DummyVecEnv([lambda: Monitor(TradingEnv(df_features, df_raw))])
+    # 1. PARALLEL ENVIRONMENTS (Faster Data Collection)
+    # i7-8700 has 12 threads. We use 8 to leave room for the OS/GPU drivers.
+    num_cpu = 8 
     
-    # 3. Initialiser Agenten (Med OPTUNA VINDER PARAMETRE)
-    print("--- Initialiserer PPO Agent med Optimerede Hyperparametre ---")
-    
-    # Her indsætter vi tallene fra dit resultat:
+    print(f"--- Creating {num_cpu} Parallel Environments ---")
+    # SubprocVecEnv creates separate processes for each env
+    env = SubprocVecEnv([make_env(i, df_features, df_raw) for i in range(num_cpu)])
+    env = VecMonitor(env) # Helper to track rewards across processes
+
+    # 2. OPTIMIZED PPO SETTINGS FOR GPU
+    # Larger batch size = better GPU usage
     model = PPO(
         "MlpPolicy", 
         env, 
         verbose=1, 
+        device="cuda", # Force GPU
         tensorboard_log="./logs/",
         
-        # --- DINE VINDER TAL ---
-        learning_rate=5.04e-5,        # Optuna: 5.0405...e-05
-        ent_coef=0.0021,              # Optuna: 0.00211...
-        batch_size=128,               # Optuna: 128
-        n_steps=2048,                 # Optuna: 2048
-        
-        # Oversættelse af "net_arch: large":
-        policy_kwargs=dict(
-            net_arch=dict(pi=[256, 256], vf=[256, 256]), 
-            activation_fn=nn.Tanh # Vi beholder Tanh, det er standard for finans
-        ),
-        
-        gamma=0.99
+        learning_rate=0.000253751204879063,
+        n_steps=2048,       # 2048 steps per environment * 8 envs = 16,384 steps per update
+        batch_size=1024,    # Increased from 128 to saturate RTX 2070
+        ent_coef=0.00026784355475329216,
+        gamma=0.99,
+        policy_kwargs=dict(net_arch=dict(pi=[64, 64], vf=[64, 64]), activation_fn=nn.Tanh)
     )
     
-    # 4. Start Træning (Lang tid nu!)
-    # Vi giver den 5.000.000 steps nu, da vi ved, at "hjernen" er indstillet korrekt.
-    TRAIN_STEPS = 5_000_000 
-    print(f"--- Starter Endelig Træning ({TRAIN_STEPS} steps) ---")
+    print("--- Starting High-Speed Training ---")
+    model.learn(total_timesteps=5_000_000, progress_bar=True)
     
-    model.learn(total_timesteps=TRAIN_STEPS, progress_bar=True)
-    
-    # 5. Gem Modellen
-    model_path = "models/ppo_novo_agent_optimized"
-    model.save(model_path)
-    print(f"--- Træning Færdig. Model gemt som '{model_path}.zip' ---")
+    model.save("models/ppo_novo_agent_optimized")
 
 if __name__ == "__main__":
+    # Windows requires this protection for multiprocessing
     train()

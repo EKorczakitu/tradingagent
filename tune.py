@@ -21,8 +21,9 @@ def optimize_agent(trial):
     # 1. Hyperparameters
     learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
     ent_coef = trial.suggest_float("ent_coef", 0.00001, 0.1, log=True)
-    batch_size = trial.suggest_categorical("batch_size", [64, 128, 256])
-    n_steps = trial.suggest_categorical("n_steps", [1024, 2048, 4096])
+    gamma = trial.suggest_float("gamma", 0.95, 0.9999)
+    n_steps = trial.suggest_categorical("n_steps", [512, 1024, 2048, 4096])
+    batch_size = trial.suggest_categorical("batch_size", [1024, 2048, 4096])
     
     # Network Architecture
     net_arch_type = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
@@ -46,13 +47,13 @@ def optimize_agent(trial):
         ent_coef=ent_coef,
         batch_size=batch_size,
         n_steps=n_steps,
-        gamma=0.99,
+        gamma=gamma,
         policy_kwargs=dict(net_arch=net_arch, activation_fn=nn.Tanh)
     )
     
     # 4. Train (Short run for evaluation)
     try:
-        model.learn(total_timesteps=30000)
+        model.learn(total_timesteps=250_000)
     except Exception as e:
         print(f"Training crashed: {e}")
         return -1000 # Penalty for crashing
@@ -117,7 +118,7 @@ if __name__ == "__main__":
 
     study = optuna.create_study(direction="maximize")
     
-    N_TRIALS = 30
+    N_TRIALS = 25
     with tqdm(total=N_TRIALS, desc="Optimizing Hyperparams") as pbar:
         for _ in range(N_TRIALS):
             study.optimize(optimize_agent, n_trials=1)
