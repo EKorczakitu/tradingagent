@@ -6,25 +6,22 @@ import pandas as pd
 class TradingEnv(gym.Env):
     """
     Optimized High-Performance Trading Environment.
-    Changes:
-    1. Converts Pandas -> Numpy in __init__ (100x faster indexing).
-    2. Pre-calculates market returns (removes math from step loop).
+    
+    Opdatering:
+    - Nu 'Backtest-ready': Returnerer balance, price og position i info-dict.
+    - Bevarer Numpy-hastigheden (ingen pandas .iloc i loopet).
     """
     metadata = {'render_modes': ['human']}
 
     def __init__(self, df_features, df_raw, spread=0.0002, downside_penalty=3.0, reward_scale=100.0):
         super(TradingEnv, self).__init__()
         
-        # 1. Convert to Numpy Arrays for speed (CRITICAL)
-        # We drop the time index, we don't need it for the Agent, only for the human.
+        # 1. Convert to Numpy Arrays for speed
         self.features_data = df_features.values.astype(np.float32)
         self.prices_data = df_raw['Close'].values.astype(np.float32)
         
-        # 2. Pre-calculate Market Returns (Vectorization)
-        # We calculate log returns for the entire dataset at once
-        # shift(-1) logic handled by numpy indexing
+        # 2. Pre-calculate Market Returns
         self.market_log_returns = np.zeros(len(self.prices_data), dtype=np.float32)
-        # log(P_t+1 / P_t)
         self.market_log_returns[:-1] = np.log(self.prices_data[1:] / self.prices_data[:-1])
         
         self.spread = spread
@@ -51,42 +48,54 @@ class TradingEnv(gym.Env):
         return self.features_data[self.current_step], {}
 
     def step(self, action):
-        # --- OPTIMIZED STEP FUNCTION ---
-        
-        # 1. Get Pre-calculated Data (Instant access)
+        # 1. Get Market Data (Instant numpy lookup)
         market_log_ret = self.market_log_returns[self.current_step]
         
         # 2. Position Logic
         prev_position = self.position
-        new_position = prev_position
+        target_position = prev_position
         
-        if action == 1: new_position = 1
-        elif action == 2: new_position = -1
-        elif action == 0: new_position = prev_position
+        if action == 1: target_position = 1    # Long
+        elif action == 2: target_position = -1 # Short
+        elif action == 0: target_position = prev_position # Hold
         
-        # 3. Cost Calculation
-        turnover = abs(new_position - prev_position)
+        # 3. Calculate Return (Based on PREVIOUS position - Execution Timing Fix)
+        gross_return = prev_position * market_log_ret
+        
+        # 4. Calculate Cost
+        turnover = abs(target_position - prev_position)
         trade_cost = turnover * self.spread
         
-        self.position = new_position
+        # 5. Net Result
+        net_return = gross_return - trade_cost
         
-        # 4. Return & Reward
-        net_return = (self.position * market_log_ret) - trade_cost
+        # 6. Update Balance (Genindført for Backtest)
+        # Vi bruger simpel rentesrente formel: Balance * exp(log_return)
+        current_balance = self.balance_history[-1]
+        new_balance = current_balance * np.exp(net_return)
+        self.balance_history.append(new_balance)
         
+        # 7. Reward Engineering
         reward = net_return
         if net_return < 0:
             reward = net_return - (self.downside_penalty * (net_return ** 2))
         
         reward *= self.reward_scale
-
-        # 5. Update
+        
+        # 8. Update State
+        self.position = target_position
         self.current_step += 1
         terminated = self.current_step >= self.max_steps
         
-        # Optional: Track balance (only math inside step)
-        # new_balance = self.balance_history[-1] * np.exp(net_return) 
-        # self.balance_history.append(new_balance)
+        # 9. Info (Genindført 'price', 'balance', 'position' for backtest.py)
+        # current_step er nu inkrementeret, så vi kigger på "næste" pris, hvilket matcher logikken
+        current_price = self.prices_data[self.current_step]
         
-        info = {'net_return': net_return} # Keep info minimal for speed
+        info = {
+            'net_return': net_return,
+            'balance': new_balance,
+            'position': self.position,
+            'price': current_price
+        }
         
         return self.features_data[self.current_step], reward, terminated, False, info

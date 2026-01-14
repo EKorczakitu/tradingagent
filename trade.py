@@ -48,13 +48,13 @@ def train():
         verbose=1, 
         device="cuda", # Force GPU
         tensorboard_log="./logs/",
-        
-        learning_rate=0.000253751204879063,
-        n_steps=2048,       # 2048 steps per environment * 8 envs = 16,384 steps per update
-        batch_size=1024,    # Increased from 128 to saturate RTX 2070
-        ent_coef=0.00026784355475329216,
-        gamma=0.99,
-        policy_kwargs=dict(net_arch=dict(pi=[64, 64], vf=[64, 64]), activation_fn=nn.Tanh)
+        clip_range=0.1,
+        learning_rate=1.4033409789977257e-05,
+        n_steps=2048,
+        batch_size=2048,
+        ent_coef=7.664396737253413e-06,
+        gamma=0.9814531835264428,
+        policy_kwargs=dict(net_arch=dict(pi=[256, 256], vf=[256,256]), activation_fn=nn.Tanh)
     )
     
     print("--- Starting High-Speed Training ---")

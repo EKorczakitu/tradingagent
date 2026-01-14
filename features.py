@@ -132,6 +132,19 @@ def generate_alpha_pool(input_df):
     
     # Distance to VWAP
     df['dist_to_vwap'] = (df['Close'] - df['rolling_vwap_24h']) / df['rolling_vwap_24h']
+    
+    # --- KATEGORI 6: Others ---
+    
+    # Efficiency Ratio (ER)
+    # 1.0 = Perfect Trend (Price went straight up)
+    # 0.0 = Pure Noise (Price bounced but went nowhere)
+    er_period = 10
+    change = df['Close'].diff(er_period).abs()
+    volatility = df['Close'].diff().abs().rolling(window=er_period).sum()
+    
+    # Safe division
+    volatility = volatility.replace(0, np.nan)
+    df['efficiency_ratio'] = change / volatility
 
     # --- RENSNING ---
     df.replace([np.inf, -np.inf], np.nan, inplace=True)

@@ -19,11 +19,11 @@ from trading_env import TradingEnv
 
 def optimize_agent(trial):
     # 1. Hyperparameters
-    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
-    ent_coef = trial.suggest_float("ent_coef", 0.00001, 0.1, log=True)
-    gamma = trial.suggest_float("gamma", 0.95, 0.9999)
-    n_steps = trial.suggest_categorical("n_steps", [512, 1024, 2048, 4096])
-    batch_size = trial.suggest_categorical("batch_size", [1024, 2048, 4096])
+    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-4, log=True)
+    ent_coef = trial.suggest_float("ent_coef", 1e-8, 0.01, log=True)
+    gamma = trial.suggest_float("gamma", 0.95, 0.999)
+    n_steps = trial.suggest_categorical("n_steps", [1024, 2048, 4096])
+    batch_size = trial.suggest_categorical("batch_size", [64,128,256])
     
     # Network Architecture
     net_arch_type = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
@@ -43,6 +43,8 @@ def optimize_agent(trial):
         "MlpPolicy",
         env_train,
         verbose=0,
+        device="cpu",
+        clip_range=0.1,
         learning_rate=learning_rate,
         ent_coef=ent_coef,
         batch_size=batch_size,
