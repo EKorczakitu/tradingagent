@@ -3,102 +3,110 @@ from sklearn.decomposition import PCA
 import pandas as pd
 import numpy as np
 import xgboost as xgb
-import seaborn as sns
 import matplotlib.pyplot as plt
 
 def feature_selection_funnel(input_df, method='xgboost', n_components_pca=0.95, top_k_features=20):
-    """
-    Phase 2: The Funnel.
-    1. Stationarity Filter (ADF)
-    2. Correlation Filter
-    3. Dimensionality Reduction (PCA eller XGBoost Feature Importance)
-    """
     df = input_df.copy()
-    dropped_log = {} # Log til at se, hvad vi smider væk
+    dropped_log = {} 
     
+    # 1. CRASH FIX: Save 'Close' for later target calculation
+    if 'Close' in input_df.columns:
+        close_price_reference = input_df['Close'].copy()
+    else:
+        close_price_reference = df.iloc[:, 0].copy() 
+
     print(f"Startede med {len(df.columns)} features.")
 
     # --- TRIN 1: Stationarity Filter (ADF Test) ---
     non_stationary_cols = []
-    print("Kører ADF Test...")
+    
+    # FEATURES WE REFUSE TO DELETE (The "Gold" List)
+    # We force these to stay because we know they are valuable, 
+    # even if they fail the strict ADF math.
+    WHITELIST = ['frac_diff_close', 'vol_regime', 'rsi_14']
+    
+    print("\n--- Kører ADF Test (Stationarity) ---")
     
     for col in df.columns:
+        if col in WHITELIST:
+            print(f"  [KEEP] {col} er whitelistet (skipper test)")
+            continue
+            
         try:
-            # ADF test
-            result = adfuller(df[col].values)
+            # CRITICAL FIX: Drop NaNs/Infs before passing to ADF
+            # This prevents the "Silent Killer" crash
+            clean_series = df[col].replace([np.inf, -np.inf], np.nan).dropna()
+            
+            if len(clean_series) < 20: # Skip if empty
+                non_stationary_cols.append(col)
+                continue
+
+            result = adfuller(clean_series.values)
             p_value = result[1]
             
-            # Hvis p-value > 0.05, kan vi ikke afvise null-hypotesen (data er ikke-stationær)
+            # Print status for key features so we can debug
+            if 'frac' in col or 'close' in col.lower():
+                print(f"  [TEST] {col}: p-value={p_value:.4f}")
+
             if p_value > 0.05:
                 non_stationary_cols.append(col)
+                
         except Exception as e:
-            # Hvis testen fejler (f.eks. konstant værdi), smid den væk
+            print(f"  [ERROR] Kunne ikke teste {col}: {e}")
             non_stationary_cols.append(col)
 
     if non_stationary_cols:
-        print(f"Fjerner {len(non_stationary_cols)} ikke-stationære features: {non_stationary_cols}")
+        print(f"Fjerner {len(non_stationary_cols)} features: {non_stationary_cols}")
         df.drop(columns=non_stationary_cols, inplace=True)
         dropped_log['non_stationary'] = non_stationary_cols
     else:
-        print("Alle features bestod ADF testen (er stationære).")
+        print("Alle features bestod.")
 
     # --- TRIN 2: Correlation Filter ---
-    print("Kører Correlation Filter...")
-    # Beregn korrelationsmatrix (absolut værdi)
+    print("\n--- Kører Correlation Filter ---")
     corr_matrix = df.corr().abs()
-    
-    # Vælg øvre trekant af korrelationsmatricen
     upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-    
-    # Find features med korrelation > 0.95
     to_drop = [column for column in upper.columns if any(upper[column] > 0.95)]
     
+    # Don't drop whitelisted features even if correlated
+    to_drop = [c for c in to_drop if c not in WHITELIST]
+    
     if to_drop:
-        print(f"Fjerner {len(to_drop)} højt korrelerede features (dubletter): {to_drop}")
+        print(f"Fjerner {len(to_drop)} dubletter: {to_drop}")
         df.drop(columns=to_drop, inplace=True)
         dropped_log['high_correlation'] = to_drop
-    else:
-        print("Ingen features overskred korrelationsgrænsen.")
 
-    # --- TRIN 3: Dimensionality Reduction ---
-    
+    # --- TRIN 3: XGBoost Selection ---
     final_df = None
     
-    if method == 'pca':
-        print(f"Kører PCA (beholder {n_components_pca*100}% varians)...")
-        pca = PCA(n_components=n_components_pca)
-        principal_components = pca.fit_transform(df)
-        
-        # Lav kolonnenavne til PC'erne
-        pc_columns = [f'PC_{i+1}' for i in range(principal_components.shape[1])]
-        final_df = pd.DataFrame(data=principal_components, columns=pc_columns, index=df.index)
-        
-        print(f"PCA reducerede features fra {len(df.columns)} til {len(pc_columns)} komponenter.")
-        
-    elif method == 'xgboost':
-        print("Kører XGBoost Feature Selection...")
-        # Instead of predicting next hour (Noise), predict next 6 hours (Trend).
-        # This forces XGBoost to pick features that predict TRENDS (like frac_diff, sma_dist)
-        # instead of features that predict NOISE (like hour_sin).
+    if method == 'xgboost':
+        print("\n--- Kører XGBoost Selection ---")
         LOOK_AHEAD = 6
-        target = (df['Close'].shift(-LOOK_AHEAD) > df['Close']).astype(int)
+        
+        # Use the saved reference price
+        target = (close_price_reference.shift(-LOOK_AHEAD) > close_price_reference).astype(int)
 
-        # Remove the last LOOK_AHEAD rows because target is NaN
         X = df.iloc[:-LOOK_AHEAD]
         y = target.iloc[:-LOOK_AHEAD]
         
         model = xgb.XGBClassifier(eval_metric='logloss')
         model.fit(X, y)
         
-        # Hent feature importance
-        importance = model.feature_importances_
-        feature_imp = pd.Series(importance, index=X.columns).sort_values(ascending=False)
+        feature_imp = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=False)
         
-        # Vælg top K features
+        # Ensure Whitelisted features are included if they have >0 importance
+        # Or just take top K
         top_features = feature_imp.head(top_k_features).index.tolist()
+        
+        # FORCE ADD WHITELIST if missing (Optional, but recommended)
+        for w in WHITELIST:
+            if w in df.columns and w not in top_features:
+                print(f"  -> Redder {w} ind i Top Features (Force Add)")
+                top_features.append(w)
+        
         final_df = df[top_features]
         
-        print(f"XGBoost valgte top {top_k_features} features:")
-        print(feature_imp.head(top_k_features))
+        print(f"XGBoost Top Features:")
+        print(feature_imp.head(10))
         
     return final_df, dropped_log
