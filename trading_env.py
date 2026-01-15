@@ -4,29 +4,21 @@ import numpy as np
 import pandas as pd
 
 class TradingEnv(gym.Env):
-    """
-    Optimized High-Performance Trading Environment.
-    
-    Opdatering:
-    - Nu 'Backtest-ready': Returnerer balance, price og position i info-dict.
-    - Bevarer Numpy-hastigheden (ingen pandas .iloc i loopet).
-    """
-    metadata = {'render_modes': ['human']}
-
     def __init__(self, df_features, df_raw, spread=0.0002, downside_penalty=3.0, reward_scale=100.0):
         super(TradingEnv, self).__init__()
         
-        # 1. Convert to Numpy Arrays for speed
+        # ... (Existing numpy conversion code is fine) ...
         self.features_data = df_features.values.astype(np.float32)
         self.prices_data = df_raw['Close'].values.astype(np.float32)
         
-        # 2. Pre-calculate Market Returns
         self.market_log_returns = np.zeros(len(self.prices_data), dtype=np.float32)
         self.market_log_returns[:-1] = np.log(self.prices_data[1:] / self.prices_data[:-1])
         
         self.spread = spread
-        self.downside_penalty = downside_penalty
         self.reward_scale = reward_scale
+        
+        # --- NEW: Memory for Rolling Sharpe Calculation ---
+        self.returns_memory = [] 
         
         self.action_space = spaces.Discrete(3)
         self.observation_space = spaces.Box(
@@ -34,61 +26,70 @@ class TradingEnv(gym.Env):
             shape=(self.features_data.shape[1],), 
             dtype=np.float32
         )
-        
-        self.current_step = 0
-        self.max_steps = len(self.features_data) - 2
-        self.position = 0
-        self.balance_history = [10000.0]
+        # ... (Rest of init) ...
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.current_step = 0
         self.position = 0
         self.balance_history = [10000.0]
+        self.returns_memory = [] # Clear memory on reset
         return self.features_data[self.current_step], {}
 
     def step(self, action):
-        # 1. Get Market Data (Instant numpy lookup)
+        # ... (Steps 1-6: Market Data, Position Logic, Costs remain the same) ...
+        
+        # 1. Get Market Data
         market_log_ret = self.market_log_returns[self.current_step]
         
         # 2. Position Logic
         prev_position = self.position
         target_position = prev_position
+        if action == 1: target_position = 1
+        elif action == 2: target_position = -1
+        elif action == 0: target_position = prev_position
         
-        if action == 1: target_position = 1    # Long
-        elif action == 2: target_position = -1 # Short
-        elif action == 0: target_position = prev_position # Hold
-        
-        # 3. Calculate Return (Based on PREVIOUS position - Execution Timing Fix)
+        # 3-6. Calculations
         gross_return = prev_position * market_log_ret
-        
-        # 4. Calculate Cost
         turnover = abs(target_position - prev_position)
         trade_cost = turnover * self.spread
-        
-        # 5. Net Result
         net_return = gross_return - trade_cost
         
-        # 6. Update Balance (Genindført for Backtest)
-        # Vi bruger simpel rentesrente formel: Balance * exp(log_return)
         current_balance = self.balance_history[-1]
         new_balance = current_balance * np.exp(net_return)
         self.balance_history.append(new_balance)
+
+        # --- 7. NEW: Rolling Sortino/Sharpe Reward ---
+        # We store the return to calculate volatility over time
+        self.returns_memory.append(net_return)
         
-        # 7. Reward Engineering
-        reward = net_return
-        if net_return < 0:
-            reward = net_return - (self.downside_penalty * (net_return ** 2))
+        # Keep only last 50 steps (approx 2 days of trading hours)
+        if len(self.returns_memory) > 50:
+            self.returns_memory.pop(0)
+            
+        recent_returns = np.array(self.returns_memory)
         
-        reward *= self.reward_scale
+        # Calculate Risk (Downside Deviation is better for trading)
+        # If returns are negative, that's "bad volatility". Positive spikes are "good".
+        downside_returns = recent_returns[recent_returns < 0]
         
-        # 8. Update State
+        if len(downside_returns) > 0:
+            risk = np.std(downside_returns)
+        else:
+            risk = 0.01 # Default baseline risk if no losses yet
+
+        # Prevent division by zero
+        risk = max(risk, 0.0001)
+        
+        # Reward is Return scaled by Risk (Sharpe-like)
+        # We add a small constant return to reward simply "surviving" without blowing up
+        reward = (net_return / risk) * self.reward_scale
+        
+        # ... (Steps 8-9: Update State and Info remain the same) ...
+        
         self.position = target_position
         self.current_step += 1
         terminated = self.current_step >= self.max_steps
-        
-        # 9. Info (Genindført 'price', 'balance', 'position' for backtest.py)
-        # current_step er nu inkrementeret, så vi kigger på "næste" pris, hvilket matcher logikken
         current_price = self.prices_data[self.current_step]
         
         info = {

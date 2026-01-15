@@ -1,6 +1,7 @@
 import optuna
 from optuna.trial import TrialState
 from stable_baselines3 import PPO
+from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.monitor import Monitor
 import pandas as pd
@@ -26,21 +27,15 @@ def optimize_agent(trial):
     batch_size = trial.suggest_categorical("batch_size", [64,128,256])
     
     # Network Architecture
-    net_arch_type = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
-    if net_arch_type == "small":
-        net_arch = dict(pi=[64, 64], vf=[64, 64])
-    elif net_arch_type == "medium":
-        net_arch = dict(pi=[128, 128], vf=[128, 128])
-    elif net_arch_type == "large":
-        net_arch = dict(pi=[256, 256], vf=[256, 256])
+    lstm_hidden_size = trial.suggest_categorical("lstm_hidden", [64, 128, 256])
 
     # 2. Environment (Train)
     # Note: We assume TradingEnv defaults to reward_scale=100.0 here, which is good for training
     env_train = DummyVecEnv([lambda: Monitor(TradingEnv(DF_FEATURES_TRAIN, DF_RAW_TRAIN_ALIGNED))])
     
     # 3. Model
-    model = PPO(
-        "MlpPolicy",
+    model = RecurrentPPO(
+        "MlpLstmPolicy",  # <--- This is the key policy for LSTM
         env_train,
         verbose=0,
         device="cpu",
@@ -50,7 +45,13 @@ def optimize_agent(trial):
         batch_size=batch_size,
         n_steps=n_steps,
         gamma=gamma,
-        policy_kwargs=dict(net_arch=net_arch, activation_fn=nn.Tanh)
+        policy_kwargs=dict(
+            # We don't need 'net_arch' as complex as before, the LSTM handles memory
+            # enable_critic_lstm ensures the Value function also has memory
+            enable_critic_lstm=True,
+            lstm_hidden_size=lstm_hidden_size,
+            activation_fn=nn.Tanh
+        )
     )
     
     # 4. Train (Short run for evaluation)

@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 import dataloading
 from trading_env import TradingEnv
+from sb3_contrib import RecurrentPPO
 
 def calculate_period_stats(df_log, start_date, end_date, initial_capital=10000):
     """Hjælpefunktion til at beregne stats for en specifik periode"""
@@ -42,23 +43,40 @@ def run_backtest():
     # 2. Miljø & Model
     env = TradingEnv(df_features_val, df_raw_aligned, spread=0.0002)
     model_path = "models/ppo_novo_agent_optimized"
+    
     try:
-        model = PPO.load(model_path)
-    except:
-        print("Kunne ikke finde model.")
+        # CHANGE 2: Load using RecurrentPPO
+        model = RecurrentPPO.load(model_path)
+    except Exception as e:
+        print(f"Kunne ikke finde model: {e}")
         return
 
     # 3. Kør Simulering
     obs, _ = env.reset()
-    done = False
+    # CHANGE 3: Initialize LSTM States
+    # Recurrent policies need 'lstm_states' to keep track of memory between steps
+    lstm_states = None
+    num_envs = 1
+    # Episode start signals the beginning of a sequence
+    episode_starts = np.ones((num_envs,), dtype=bool)
     
-    # Vi gemmer data i en DataFrame for nemmere analyse bagefter
+    done = False
     history = []
     
     print("Genererer handelsdata...")
     while not done:
-        action, _ = model.predict(obs, deterministic=True)
+        # CHANGE 4: Predict passing the memory states
+        action, lstm_states = model.predict(
+            obs, 
+            state=lstm_states, 
+            episode_start=episode_starts,
+            deterministic=True
+        )
+        
         obs, reward, terminated, truncated, info = env.step(action)
+        
+        # Update episode start (it's False after the first step)
+        episode_starts = terminated or truncated
         
         # Gem timestamp og data
         current_time = df_raw_aligned.index[env.current_step - 1] # -1 fordi step tæller op
