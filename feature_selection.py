@@ -77,22 +77,15 @@ def feature_selection_funnel(input_df, method='xgboost', n_components_pca=0.95, 
         
     elif method == 'xgboost':
         print("Kører XGBoost Feature Selection...")
-        # Vi skal lave et simpelt 'target' for at træne XGBoost.
-        # Target: 1 hvis næste Close er højere end nuværende, ellers 0 (Next Bar Up/Down)
-        # Vi bruger df_processed (før normalisering) til at lave target, da vi har brug for priserne, 
-        # men her antager vi at input_df allerede er features. 
-        # Vi laver et 'dummy' target baseret på log_ret hvis det findes, ellers kan vi ikke køre superviseret feature selection.
-        
-        if 'log_ret' in df.columns:
-            target = (df['log_ret'].shift(-1) > 0).astype(int)
-        else:
-            # Fallback: Hvis log_ret blev fjernet eller omdøbt, brug den første kolonne som proxy eller stop
-            print("Advarsel: 'log_ret' mangler til target generering. Bruger første feature til simpel demo (dette bør rettes til rigtig target).")
-            target = (df.iloc[:, 0].shift(-1) > 0).astype(int)
+        # Instead of predicting next hour (Noise), predict next 6 hours (Trend).
+        # This forces XGBoost to pick features that predict TRENDS (like frac_diff, sma_dist)
+        # instead of features that predict NOISE (like hour_sin).
+        LOOK_AHEAD = 6
+        target = (df['Close'].shift(-LOOK_AHEAD) > df['Close']).astype(int)
 
-        # Fjern sidste række pga shift
-        X = df.iloc[:-1]
-        y = target.iloc[:-1]
+        # Remove the last LOOK_AHEAD rows because target is NaN
+        X = df.iloc[:-LOOK_AHEAD]
+        y = target.iloc[:-LOOK_AHEAD]
         
         model = xgb.XGBClassifier(eval_metric='logloss')
         model.fit(X, y)

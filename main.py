@@ -4,15 +4,31 @@ import features
 import feature_selection
 
 def run_pipeline():
-    print("--- Starter Pipeline (Institutional Grade) ---")
+    print("--- Starter Pipeline (Walk-Forward Setup) ---")
 
-    # 1. INDLÆS DATA
-    print("\n--- TRIN 1: Indlæser Data ---")
-    df_train, df_val, df_test = dataloading.get_novo_nordisk_split()
+    # 1. LOAD EVERYTHING
+    df_full = dataloading.get_full_dataset()
     
-    print(f"Original Train size: {df_train.shape}")
-    print(f"Original Val size:   {df_val.shape}")
-    print(f"Original Test size:  {df_test.shape}")
+    # 2. DEFINER SPLIT (Regime Awareness)
+    # Vi vil teste på 2024 (Val) og 2025 (Test)
+    # Men vi vil træne på data LIGE INDEN 2024 for at fange det nyeste regime.
+    
+    TEST_START = pd.Timestamp("2025-01-01", tz="UTC")
+    VAL_START  = pd.Timestamp("2024-01-01", tz="UTC")
+    
+    # Train slutter hvor Val starter
+    df_train = df_full[df_full.index < VAL_START].copy()
+    df_val   = df_full[(df_full.index >= VAL_START) & (df_full.index < TEST_START)].copy()
+    df_test  = df_full[df_full.index >= TEST_START].copy()
+
+    # OPTIONAL: "Windowing" - Klip starten af Train af, hvis den er for gammel (f.eks. kun behold 4 år)
+    # Dette hjælper hvis markedet i 2016 er irrelevant for 2024.
+    # train_start_cutoff = VAL_START - pd.DateOffset(years=4)
+    # df_train = df_train[df_train.index >= train_start_cutoff]
+
+    print(f"Train Range: {df_train.index[0]} -> {df_train.index[-1]} ({len(df_train)} rows)")
+    print(f"Val Range:   {df_val.index[0]}   -> {df_val.index[-1]}   ({len(df_val)} rows)")
+    print(f"Test Range:  {df_test.index[0]}  -> {df_test.index[-1]}  ({len(df_test)} rows)")
 
     # 2. GENERER FEATURES (Med "Warm-Up" Buffer)
     print("\n--- TRIN 2: Genererer Alpha Pool med Warm-Up ---")

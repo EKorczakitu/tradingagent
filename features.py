@@ -22,7 +22,7 @@ def generate_alpha_pool(input_df):
     df['log_ret'] = np.log(df['Close'] / df['Close'].shift(1))
     
     # Fractional Differentiation (Kan aktiveres hvis nødvendigt)
-    df['frac_diff_close'] = frac_diff_ffd(df['Close'], d=0.4, thres=1e-3) 
+    df['frac_diff_close'] = frac_diff_ffd(df['Close'], d=0.6, thres=1e-3) 
 
     # --- KATEGORI 2: Momentum ---
     
@@ -117,8 +117,9 @@ def generate_alpha_pool(input_df):
     # --- KATEGORI 5: Volume & Microstructure ---
     
     # OBV
-    df['obv'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
-
+    raw_obv = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
+    df['obv_roc'] = raw_obv.pct_change().replace([np.inf, -np.inf], 0)
+    
     # Rolling VWAP (24 Timer)
     vwap_window = 24 
     vwap_tp = (df['High'] + df['Low'] + df['Close']) / 3
