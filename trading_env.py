@@ -85,6 +85,8 @@ class TradingEnv(gym.Env):
         # We add a small constant return to reward simply "surviving" without blowing up
         reward = (net_return / risk) * self.reward_scale
         
+        # Prevents exploding gradients if risk is near-zero
+        reward = np.clip(reward, -10, 10)
         # ... (Steps 8-9: Update State and Info remain the same) ...
         
         self.position = target_position
