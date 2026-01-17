@@ -22,34 +22,44 @@ def calculate_period_stats(df_log, start_date, end_date):
     return {'Agent': agent_ret, 'Market': mkt_ret, 'Diff': agent_ret - mkt_ret}
 
 def run_discrete_ensemble_backtest():
-    print("--- Starter Discrete Ensemble Backtest (Voting) ---")
+    print("--- Starter Discrete Ensemble Backtest (Voting - 5 Modeller) ---")
 
-    # 1. Data Setup (Standard)
+    # 1. Data Setup
     df_full = dataloading.get_full_dataset()
     VAL_START = pd.Timestamp("2024-01-01", tz="UTC")
     TEST_START = pd.Timestamp("2025-01-01", tz="UTC")
     df_raw = df_full[(df_full.index >= VAL_START) & (df_full.index < TEST_START)].copy()
+    
     try:
         df_feat = pd.read_csv('data/processed_val.csv', index_col=0, parse_dates=True)
-    except: return
+    except:
+        print("Fejl: Kunne ikke finde processed_val.csv")
+        return
 
     common_index = df_raw.index.intersection(df_feat.index)
     df_raw = df_raw.loc[common_index]
     df_feat = df_feat.loc[common_index]
     
-    # 2. Indlæs Modeller
+    # 2. Indlæs Modeller (Nu 5 stk)
     models = []
-    n_models = 3
+    n_models = 5
+    print(f"Indlæser {n_models} modeller...")
+    
     for i in range(n_models):
         path = f"models/ppo_discrete_ensemble_{i}"
-        models.append(RecurrentPPO.load(path, device='cpu'))
-        print(f"Loaded {path}")
+        try:
+            # Vi loader på CPU for ikke at løbe tør for VRAM under backtest
+            models.append(RecurrentPPO.load(path, device='cpu'))
+            print(f" -> Loaded {path}")
+        except Exception as e:
+            print(f"FEJL: Kunne ikke loade {path}. Har du trænet alle 5? ({e})")
+            return
 
     # 3. Miljø
     env = TradingEnv(df_feat, df_raw, spread=0.0002)
     obs, _ = env.reset()
     
-    # Hver agent har sin egen hjerne
+    # Hver agent har sin egen hjerne (LSTM states)
     lstm_states = [None] * n_models
     episode_starts = np.ones((1,), dtype=bool)
     
@@ -59,21 +69,23 @@ def run_discrete_ensemble_backtest():
     print("Kører Voting...")
     while not done:
         votes = []
+        # Hent bud fra alle 5 modeller
         for i, model in enumerate(models):
             action, new_state = model.predict(obs, state=lstm_states[i], episode_start=episode_starts, deterministic=True)
             lstm_states[i] = new_state
-            votes.append(int(action[0])) # Gem som heltal (0, 1, 2)
+            votes.append(int(action.item()))
             
-        # --- VOTING LOGIK ---
-        # Find den action der optræder flest gange (Mode)
-        # Eks: [1, 1, 0] -> 1 vinder
-        # Eks: [0, 2, 0] -> 0 vinder
+        # --- NY VOTING LOGIK (Tilpasset 5 modeller) ---
         c = Counter(votes)
-        winner_action = c.most_common(1)[0][0]
+        most_common = c.most_common() # Returnerer liste af tuples, f.eks. [(1, 3), (0, 2)]
         
-        # Hvis der er total uenighed (f.eks. 0, 1, 2), så vælg 'Hold' (0) som sikkerhed
-        if n_models == 3 and len(c) == 3:
-            winner_action = 0 # Safety first!
+        winner_action = most_common[0][0]
+        
+        # Tie-breaker / Safety First:
+        # Hvis der er flere end 1 valgmulighed, og de to øverste har lige mange stemmer
+        # (F.eks. 2 stemmer på 'Long' og 2 stemmer på 'Short') -> Så vælg 'Hold' (0)
+        if len(most_common) > 1 and most_common[0][1] == most_common[1][1]:
+            winner_action = 0 
             
         obs, reward, terminated, truncated, info = env.step(winner_action)
         
@@ -85,7 +97,8 @@ def run_discrete_ensemble_backtest():
             'Balance': info['balance'],
             'Price': info['price'],
             'Position': info['position'],
-            'Vote_Agreement': c.most_common(1)[0][1] / n_models # 1.0 = Alle enige
+            # Hvor enige er de? (Antal stemmer på vinderen / total antal modeller)
+            'Vote_Agreement': most_common[0][1] / n_models 
         })
         
         if terminated or truncated:
@@ -120,9 +133,9 @@ def run_discrete_ensemble_backtest():
         agent_norm = (df_res['Balance'] / df_res['Balance'].iloc[0]) * 100
         market_norm = (df_res['Price'] / df_res['Price'].iloc[0]) * 100
         
-        ax1.plot(agent_norm, label='Ensemble Agent (Avg)', color='blue')
+        ax1.plot(agent_norm, label='Ensemble Agent (Voting)', color='blue')
         ax1.plot(market_norm, label='Market', color='gray', linestyle='--')
-        ax1.set_title('Ensemble Performance (2024)')
+        ax1.set_title('Ensemble Performance (5 Models)')
         ax1.legend()
         ax1.grid(True)
         

@@ -68,15 +68,15 @@ def objective(trial):
     """
     
     # --- 1. Suggest Hyperparameters ---
-    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
-    gamma = trial.suggest_float("gamma", 0.90, 0.9999)
-    gae_lambda = trial.suggest_float("gae_lambda", 0.90, 1.0)
-    ent_coef = trial.suggest_float("ent_coef", 0.00001, 0.01, log=True)
+    learning_rate = trial.suggest_float("learning_rate", 1e-4, 5e-4, log=True)
+    gamma = trial.suggest_float("gamma", 0.90, 0.95)
+    gae_lambda = trial.suggest_float("gae_lambda", 0.95, 1.0)
+    ent_coef = trial.suggest_float("ent_coef", 1e-6, 1e-4, log=True)
     max_grad_norm = trial.suggest_float("max_grad_norm", 0.3, 1.0)
     
     # LSTM Specifics
-    n_steps = trial.suggest_categorical("n_steps", [128, 256, 512, 1024, 2048])
-    batch_size = trial.suggest_categorical("batch_size", [128, 256])
+    n_steps = trial.suggest_categorical("n_steps", [2048, 4096])
+    batch_size = trial.suggest_categorical("batch_size", [512, 1024])
     lstm_hidden_size = trial.suggest_categorical("lstm_hidden", [64, 128, 256])
     
     # Constraint: Batch size must be a factor of n_steps (or smaller)
@@ -115,7 +115,7 @@ def objective(trial):
     # --- 4. Train with Early Stopping ---
     # We train for a shorter period during tuning to save time
     
-    eval_freq = 10000  # <--- Change this from n_steps to 5000
+    eval_freq = 15000  # <--- Change this from n_steps to 5000
     eval_freq = max(eval_freq, n_steps)
     
     eval_callback = EvalCallback(

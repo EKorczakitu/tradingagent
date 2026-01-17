@@ -132,4 +132,4 @@ def train_ensemble(n_models=3):
         env.close()
 
 if __name__ == "__main__":
-    train_ensemble(n_models=3)
+    train_ensemble(n_models=5)
