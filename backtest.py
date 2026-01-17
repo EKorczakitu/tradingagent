@@ -1,10 +1,9 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from stable_baselines3 import PPO
+from sb3_contrib import RecurrentPPO
 import dataloading
 from trading_env import TradingEnv
-from sb3_contrib import RecurrentPPO
 
 def calculate_period_stats(df_log, start_date, end_date, initial_capital=10000):
     """Hjælpefunktion til at beregne stats for en specifik periode"""
@@ -31,33 +30,50 @@ def calculate_period_stats(df_log, start_date, end_date, initial_capital=10000):
 def run_backtest():
     print("--- Starter Dybdegående Backtest (2024) ---")
 
-    # 1. Data Setup
-    _, df_raw_val, _ = dataloading.get_novo_nordisk_split()
+    # 1. Data Setup (RETTET)
+    # Vi bruger nu den nye 'get_full_dataset' funktion
+    df_full = dataloading.get_full_dataset()
+    
+    # Definer Valideringsperioden (samme som i main.py)
+    VAL_START = pd.Timestamp("2024-01-01", tz="UTC")
+    TEST_START = pd.Timestamp("2025-01-01", tz="UTC")
+    
+    # Snit rådata til 2024 (Validering)
+    df_raw_val = df_full[(df_full.index >= VAL_START) & (df_full.index < TEST_START)].copy()
+    
+    # Indlæs de processerede features (skal være genereret af main.py først)
     try:
         df_features_val = pd.read_csv('data/processed_val.csv', index_col=0, parse_dates=True)
-    except:
+    except FileNotFoundError:
+        print("FEJL: Kunne ikke finde 'data/processed_val.csv'. Kør main.py først!")
         return
 
-    df_raw_aligned = df_raw_val.loc[df_features_val.index]
+    # Sørg for at indeks matcher præcist (Intersection)
+    common_index = df_raw_val.index.intersection(df_features_val.index)
+    df_raw_aligned = df_raw_val.loc[common_index]
+    df_features_aligned = df_features_val.loc[common_index]
     
+    print(f"Backtest Data: {len(df_features_aligned)} candles")
+
     # 2. Miljø & Model
-    env = TradingEnv(df_features_val, df_raw_aligned, spread=0.0002)
+    # Vi bruger de alignede data
+    env = TradingEnv(df_features_aligned, df_raw_aligned, spread=0.0002)
     model_path = "models/ppo_novo_agent_optimized"
     
     try:
-        # CHANGE 2: Load using RecurrentPPO
+        print(f"Indlæser model fra: {model_path}")
         model = RecurrentPPO.load(model_path)
     except Exception as e:
         print(f"Kunne ikke finde model: {e}")
+        print("Husk at køre 'trade.py' først for at træne modellen!")
         return
 
     # 3. Kør Simulering
     obs, _ = env.reset()
-    # CHANGE 3: Initialize LSTM States
-    # Recurrent policies need 'lstm_states' to keep track of memory between steps
+    
+    # LSTM States håndtering
     lstm_states = None
     num_envs = 1
-    # Episode start signals the beginning of a sequence
     episode_starts = np.ones((num_envs,), dtype=bool)
     
     done = False
@@ -65,7 +81,6 @@ def run_backtest():
     
     print("Genererer handelsdata...")
     while not done:
-        # CHANGE 4: Predict passing the memory states
         action, lstm_states = model.predict(
             obs, 
             state=lstm_states, 
@@ -75,11 +90,12 @@ def run_backtest():
         
         obs, reward, terminated, truncated, info = env.step(action)
         
-        # Update episode start (it's False after the first step)
         episode_starts = terminated or truncated
         
         # Gem timestamp og data
-        current_time = df_raw_aligned.index[env.current_step - 1] # -1 fordi step tæller op
+        # Vi bruger env.current_step - 1, fordi step lige er blevet talt op
+        current_time = df_raw_aligned.index[env.current_step - 1] 
+        
         history.append({
             'Date': current_time,
             'Balance': info['balance'],
@@ -94,7 +110,7 @@ def run_backtest():
     df_res = pd.DataFrame(history)
     df_res.set_index('Date', inplace=True)
     
-    # 4. KVARTALSVIS ANALYSE (Sandhedens Time)
+    # 4. KVARTALSVIS ANALYSE
     print("\n" + "="*65)
     print(f"{'PERIODE':<15} | {'AGENT %':<10} | {'MARKED %':<10} | {'ALPHA (Diff)':<10}")
     print("-" * 65)
@@ -113,27 +129,24 @@ def run_backtest():
             print(f"{name:<15} | {stats['Agent']:>9.2f}% | {stats['Market']:>9.2f}% | {stats['Diff']:>9.2f}%")
     print("="*65)
 
-    # 5. Plotting med Alpha Curve
+    # 5. Plotting
     try:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
         
-        # Øverste graf: Værdier
-        # Normaliser til 100 for nem sammenligning
+        # Øverste graf: Værdier (Rebased til 100)
         agent_norm = (df_res['Balance'] / df_res['Balance'].iloc[0]) * 100
         market_norm = (df_res['Price'] / df_res['Price'].iloc[0]) * 100
         
         ax1.plot(agent_norm, label='AI Agent (Rebased)', color='blue')
         ax1.plot(market_norm, label='Buy & Hold (Rebased)', color='gray', linestyle='--')
-        ax1.set_title('Performance Sammenligning')
+        ax1.set_title('Performance Sammenligning (2024)')
         ax1.set_ylabel('Værdi (Indeks 100)')
         ax1.legend()
         ax1.grid(True)
         
-        # Nederste graf: Alpha (Agent - Market)
-        # Hvis linjen er over 0, slår vi markedet. Under 0, taber vi.
+        # Nederste graf: Alpha
         alpha_curve = agent_norm - market_norm
         
-        # Farv området grønt/rødt
         ax2.fill_between(alpha_curve.index, alpha_curve, 0, where=(alpha_curve >= 0), color='green', alpha=0.3, label='Outperformance')
         ax2.fill_between(alpha_curve.index, alpha_curve, 0, where=(alpha_curve < 0), color='red', alpha=0.3, label='Underperformance')
         

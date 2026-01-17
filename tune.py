@@ -115,7 +115,7 @@ def objective(trial):
     # --- 4. Train with Early Stopping ---
     # We train for a shorter period during tuning to save time
     
-    eval_freq = 5000  # <--- Change this from n_steps to 5000
+    eval_freq = 10000  # <--- Change this from n_steps to 5000
     eval_freq = max(eval_freq, n_steps)
     
     eval_callback = EvalCallback(
@@ -128,8 +128,8 @@ def objective(trial):
     )
     
     try:
-        # Train for 100,000 steps (enough to see if it learns)
-        model.learn(total_timesteps=100000, callback=eval_callback)
+        # Train for 150,000 steps (enough to see if it learns)
+        model.learn(total_timesteps=150000, callback=eval_callback)
     except Exception as e:
         print(f"Trial failed with error: {e}")
         return -1000 # Return bad score on crash
@@ -147,7 +147,7 @@ def run_tuning():
     study = optuna.create_study(direction="maximize")
     
     # Run 30 trials (increase this if you have time, e.g., 50 or 100)
-    study.optimize(objective, n_trials=30, show_progress_bar=True)
+    study.optimize(objective, n_trials=20, show_progress_bar=True)
     
     print("\n--- Tuning Complete ---")
     print("Best Params:", study.best_params)
