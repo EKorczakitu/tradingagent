@@ -76,7 +76,7 @@ def objective(trial):
     
     # LSTM Specifics
     n_steps = trial.suggest_categorical("n_steps", [128, 256, 512, 1024, 2048])
-    batch_size = trial.suggest_categorical("batch_size", [64, 128, 256])
+    batch_size = trial.suggest_categorical("batch_size", [128, 256])
     lstm_hidden_size = trial.suggest_categorical("lstm_hidden", [64, 128, 256])
     
     # Constraint: Batch size must be a factor of n_steps (or smaller)
