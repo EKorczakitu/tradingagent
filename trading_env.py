@@ -5,36 +5,29 @@ import pandas as pd
 
 class TradingEnv(gym.Env):
     """
-    Institutional Grade Trading Environment
-    - Fee Simulation
-    - Sortino/Sharpe Reward
-    - Position Management
+    Institutional Grade Trading Environment V2
+    - Continuous Action Space (-1.0 to 1.0)
+    - Risk-Adjusted Reward (No Rolling Sharpe instability)
     """
-    def __init__(self, df_features, df_raw, spread=0.0002, downside_penalty=3.0, reward_scale=100.0):
+    def __init__(self, df_features, df_raw, spread=0.0002):
         super(TradingEnv, self).__init__()
         
         # Data Setup
         self.features_data = df_features.values.astype(np.float32)
         self.prices_data = df_raw['Close'].values.astype(np.float32)
         
-        # Pre-calculate market returns for speed
+        # Log returns for speed
         self.market_log_returns = np.zeros(len(self.prices_data), dtype=np.float32)
-        # Avoid division by zero with small epsilon, though Close should never be 0
         self.market_log_returns[:-1] = np.log(self.prices_data[1:] / (self.prices_data[:-1] + 1e-9))
         
-        # --- FIX: Define max_steps ---
         self.max_steps = len(self.prices_data) - 1
-        
         self.spread = spread
-        self.reward_scale = reward_scale
         
-        # Memory for Rolling Sharpe
-        self.returns_memory = [] 
+        # --- ÆNDRING 1: Continuous Action Space ---
+        # Agenten outputter ét tal mellem -1 (Fuld Short) og 1 (Fuld Long)
+        self.action_space = spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32)
         
-        # Action Space: 0=Hold, 1=Long, 2=Short
-        self.action_space = spaces.Discrete(3)
-        
-        # Observation Space: N features
+        # Observation Space (Uændret)
         self.observation_space = spaces.Box(
             low=-10.0, high=10.0, 
             shape=(self.features_data.shape[1],), 
@@ -43,34 +36,35 @@ class TradingEnv(gym.Env):
         
         # State variables
         self.current_step = 0
-        self.position = 0
+        self.position = 0.0 # Nu en float!
         self.balance_history = [10000.0]
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.current_step = 0
-        self.position = 0
+        self.position = 0.0
         self.balance_history = [10000.0]
-        self.returns_memory = [] 
         return self.features_data[self.current_step], {}
 
     def step(self, action):
-        # 1. Get Market Data for NEXT step
+        # 1. Get Market Data
         market_log_ret = self.market_log_returns[self.current_step]
         
-        # 2. Position Logic
+        # 2. Position Logic (Continuous)
         prev_position = self.position
-        target_position = prev_position
         
-        if action == 1: target_position = 1   # Long
-        elif action == 2: target_position = -1 # Short
-        elif action == 0: target_position = prev_position # Hold
+        # Action kommer som et array fra modellen, f.eks. [0.75]
+        # Vi clipper for en sikkerheds skyld
+        target_position = float(np.clip(action[0], -1, 1))
         
         # 3. Cost Calculation
+        # Vi betaler kun spread af ÆNDRINGEN i positionen
         turnover = abs(target_position - prev_position)
         trade_cost = turnover * self.spread
         
         # 4. Return Calculation
+        # Simulerer afkast baseret på positionen (prev_position holder vi gennem perioden)
+        # Note: Dette er en simplificering. I live trading vil man gradvist skifte.
         gross_return = prev_position * market_log_ret
         net_return = gross_return - trade_cost
         
@@ -79,32 +73,27 @@ class TradingEnv(gym.Env):
         new_balance = current_balance * np.exp(net_return)
         self.balance_history.append(new_balance)
 
-        # 6. Reward Engineering (Sortino/Sharpe)
-        self.returns_memory.append(net_return)
-        if len(self.returns_memory) > 50: self.returns_memory.pop(0)
-            
-        recent_returns = np.array(self.returns_memory)
-        downside_returns = recent_returns[recent_returns < 0]
+        # --- ÆNDRING 2: Robust Reward Function ---
+        # I stedet for Sharpe, bruger vi direkte risiko-straf.
         
-        # Calculate risk (Downside Deviation)
-        if len(downside_returns) > 0:
-            risk = np.std(downside_returns)
-        else:
-            risk = 0.01 # Default baseline
-            
-        risk = max(risk, 0.0001) # Avoid zero division
+        # Straf for volatilitet (Agenten lærer at undgå store sving)
+        risk_penalty = 0.05 * (abs(net_return) ** 2) * 100 
         
-        # Reward = Return / Risk
-        reward = (net_return / risk) * self.reward_scale
+        # Straf for at handle for meget (Transaction Cost awareness)
+        cost_penalty = trade_cost * 10
         
-        # Clip Reward for Stability
-        reward = np.clip(reward, -10, 10)
+        # Reward er afkast minus smerte
+        # Vi ganger med 100 for at få tallet op i et område, det neurale netværk kan lide (f.eks. -1 til 1)
+        reward = (net_return * 100) - risk_penalty - cost_penalty
+
+        # Clip reward for at undgå eksplosioner (f.eks. ved vilde markedshop)
+        reward = np.clip(reward, -5, 5)
         
-        # 7. Next Step
+        # 6. Next Step
         self.position = target_position
         self.current_step += 1
         
-        # 8. Termination
+        # 7. Termination
         terminated = self.current_step >= self.max_steps
         current_price = self.prices_data[self.current_step]
         

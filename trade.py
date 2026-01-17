@@ -160,23 +160,28 @@ def train():
         ent_coef=params['ent_coef'],
         gamma=params['gamma'],
         
+        # --- ÆNDRING: Aktiver gSDE ---
+        use_sde=True,           # Tænd for State Dependent Exploration
+        sde_sample_freq=4,      # Stabiliserer udforskning
+        
         policy_kwargs=dict(
             enable_critic_lstm=True, 
             lstm_hidden_size=params.get('lstm_hidden', 256), # Handle the specific LSTM param
             net_arch=dict(pi=[64, 64], vf=[64, 64]),
-            activation_fn=nn.Tanh
+            activation_fn=nn.Tanh,
+            log_std_init=-2  # Start med små bevægelser, ikke vilde gæt
         )
     )
     
+    # Ændr filnavnet, så vi kan kende forskel
     print("--- Starting Institutional Training ---")
     hedge_fund_monitor = HedgeFundCallback(check_freq=10000)
     
-    # 2 Million Steps is a good baseline
     model.learn(total_timesteps=2_000_000, callback=hedge_fund_monitor, progress_bar=True)
     
     print("--- Saving Model ---")
-    model.save("models/ppo_novo_agent_optimized")
-    print("Model saved to models/ppo_novo_agent_optimized.zip")
+    model.save("models/ppo_novo_agent_continuous") # Nyt navn!
+    print("Model saved to models/ppo_novo_agent_continuous.zip")
 
 if __name__ == "__main__":
     train()
