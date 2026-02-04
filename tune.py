@@ -139,8 +139,8 @@ def objective(trial):
     )
     
     try:
-        # Train for 200,000 steps (HPC har råd til lidt længere runs per trial)
-        model.learn(total_timesteps=200000, callback=eval_callback)
+        # Train for 500,000 steps (HPC har råd til lidt længere runs per trial)
+        model.learn(total_timesteps=500000, callback=eval_callback)
     except Exception as e:
         print(f"Trial failed with error: {e}")
         # Returner en meget lav score så Optuna undgår disse parametre
