@@ -1,11 +1,46 @@
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
+from scipy.stats import linregress
+
+# --- HJÆLPEFUNKTIONER ---
+
+def get_weights_ffd(d, thres):
+    w, k = [1.], 1
+    while True:
+        w_k = -w[-1] / k * (d - k + 1)
+        if abs(w_k) < thres:
+            break
+        w.append(w_k)
+        k += 1
+    return np.array(w[::-1]).reshape(-1, 1)
+
+def frac_diff_ffd(series, d, thres=1e-3):
+    series = series.dropna()
+    w = get_weights_ffd(d, thres)
+    width = len(w) - 1
+    output = []
+    for i in range(width, len(series)):
+        val = np.dot(w.T, series.iloc[i-width:i+1])[0]
+        output.append(val)
+    return pd.Series(output, index=series.index[width:])
+
+def get_slope(array):
+    """Beregner hældningskoefficienten (slope) for en tidsserie"""
+    y = np.array(array)
+    x = np.arange(len(y))
+    # Hvis array er konstant, returner 0 for at undgå fejl
+    if np.all(y == y[0]):
+        return 0.0
+    slope, _, _, _, _ = linregress(x, y)
+    return slope
+
+# --- HOVEDFUNKTIONER ---
 
 def generate_alpha_pool(input_df):
     """
     Genererer en "Alpha Pool" af features til DRL baseret på OHLCV data.
-    Indeholder sikkerhed mod division-med-nul og håndterer inaktive perioder.
+    Indeholder nu Avancerede Statistiske Features (HPC-ready).
     """
     df = input_df.copy()
     
@@ -21,7 +56,7 @@ def generate_alpha_pool(input_df):
     # Log Returns (Baseline feature)
     df['log_ret'] = np.log(df['Close'] / df['Close'].shift(1))
     
-    # Fractional Differentiation (Kan aktiveres hvis nødvendigt)
+    # Fractional Differentiation
     df['frac_diff_close'] = frac_diff_ffd(df['Close'], d=0.8, thres=1e-3) 
 
     # --- KATEGORI 2: Momentum ---
@@ -134,29 +169,23 @@ def generate_alpha_pool(input_df):
     # Distance to VWAP
     df['dist_to_vwap'] = (df['Close'] - df['rolling_vwap_24h']) / df['rolling_vwap_24h']
 
-    # --- KATEGORI 6: Long-term Trend & Regimes (NY) ---
+    # --- KATEGORI 6: Long-term Trend & Regimes ---
 
     # Simple Moving Averages (SMA)
-    # Vi bruger 50 (mellemlang) og 200 (lang/institutionel trend)
     sma_50 = df['Close'].rolling(window=50).mean()
     sma_200 = df['Close'].rolling(window=200).mean()
     
     # Distance to SMAs (Normaliseret)
-    # Dette er CRITICAL for at fikse "Shorting the Bull Market" fejlen.
-    # Hvis prisen er langt over SMA200 (positiv værdi), ved agenten, at den lange trend er OP.
     sma_50_safe = sma_50.replace(0, np.nan)
     sma_200_safe = sma_200.replace(0, np.nan)
     
     df['dist_to_sma50'] = (df['Close'] - sma_50) / sma_50_safe
     df['dist_to_sma200'] = (df['Close'] - sma_200) / sma_200_safe
     
-    # SMA Cross Spread (Golden Cross / Death Cross potential)
-    # Måler afstanden mellem kort og lang trend
+    # SMA Cross Spread
     df['sma_cross_spread'] = (sma_50 - sma_200) / sma_200_safe
 
-    # Kaufman's Efficiency Ratio (Regime Filter)
-    # 1.0 = Perfekt Trend (Prisen gik ligeud)
-    # 0.0 = Ren Støj (Prisen hoppede men kom ingen vegne)
+    # Kaufman's Efficiency Ratio
     er_period = 10
     change = df['Close'].diff(er_period).abs()
     volatility = df['Close'].diff().abs().rolling(window=er_period).sum()
@@ -164,45 +193,81 @@ def generate_alpha_pool(input_df):
     
     df['efficiency_ratio'] = change / volatility_safe
 
-    # --- KATEGORI 7: Context & Seasonality (NY) ---
+    # --- KATEGORI 7: Context & Seasonality ---
     
-    # 1. Cyklisk Tid (Time Encoding)
-    # Gør at agenten kan lære intradag-mønstre (f.eks. "Volatilitet stiger kl 9 og 15")
-    # Vi mapper timer (0-23) til en cirkel.
+    # Cyklisk Tid
     df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24)
     df['hour_cos'] = np.cos(2 * np.pi * df.index.hour / 24)
-    
-    # Ugedag (0-6) - Kan fange "Friday Sell-off" eller "Monday Rally"
     df['day_sin'] = np.sin(2 * np.pi * df.index.dayofweek / 7)
     df['day_cos'] = np.cos(2 * np.pi * df.index.dayofweek / 7)
 
-    # 2. Parkinson Volatility (High-Low baseret volatilitet)
-    # Måler "Panic" bedre end standard deviation, da den bruger vægerne (High/Low)
-    # Formel: (1 / 4*ln(2)) * ln(High/Low)^2
+    # Parkinson Volatility
     high_low_ratio = df['High'] / df['Low']
-    high_low_ratio = high_low_ratio.replace(0, 1) # Sikkerhed
+    high_low_ratio = high_low_ratio.replace(0, 1)
     df['parkinson_vol'] = np.sqrt(0.361 * np.log(high_low_ratio)**2)
 
-    # 3. Lagged Returns (Short-term Memory)
-    # Giver agenten direkte adgang til momentum fra de sidste 3 timer
+    # Lagged Returns
     df['log_ret_lag1'] = df['log_ret'].shift(1)
     df['log_ret_lag2'] = df['log_ret'].shift(2)
     df['log_ret_lag3'] = df['log_ret'].shift(3)
     
-    # 4. Volatility Regime (Ulcer Index inspireret)
-    # Måler nedsiderisiko specifikt (frygt-indikator)
-    # Rullende max drawdown over 14 perioder
+    # Volatility Regime
     rolling_max = df['Close'].rolling(window=14).max()
     drawdown = (df['Close'] - rolling_max) / rolling_max
-    df['rolling_drawdown'] = drawdown # Vil altid være negativ eller 0
+    df['rolling_drawdown'] = drawdown 
     
-    # Ratio of recent volatility to long-term volatility
     df['vol_regime'] = df['Close'].rolling(20).std() / df['Close'].rolling(100).std()
-    # Normalized Volume (relative to recent history)
     df['vol_rel'] = df['Volume'] / df['Volume'].rolling(50).mean()
+
+    # --- KATEGORI 8: Statistical & Math (NY - HPC ENABLED) ---
     
+    # 1. Rolling Linear Regression Slope (Trend Vinkel)
+    # Måler hvor aggressiv trenden er (mere robust end bare ROC)
+    # Note: Dette er tungt beregningsmæssigt, men HPC klarer det.
+    window_slope = 14
+    df['linreg_slope'] = df['Close'].rolling(window=window_slope).apply(get_slope, raw=True)
+    
+    # 2. Z-Score (Mean Reversion)
+    # Hvor mange standardafvigelser er vi fra gennemsnittet?
+    # > 2 betyder ofte overkøbt, < -2 oversolgt.
+    z_window = 20
+    roll_mean = df['Close'].rolling(window=z_window).mean()
+    roll_std = df['Close'].rolling(window=z_window).std()
+    roll_std_safe = roll_std.replace(0, np.nan)
+    df['z_score'] = (df['Close'] - roll_mean) / roll_std_safe
+    
+    # 3. Short/Long Volatility Ratio (Regime Shift Detector)
+    # Hvis denne stiger pludseligt, er vi på vej ind i et nyt regime (ofte crash/rally).
+    # Vi bruger 10 (meget kort) vs 100 (lang).
+    vol_short = df['Close'].rolling(10).std()
+    vol_long = df['Close'].rolling(100).std()
+    vol_long_safe = vol_long.replace(0, np.nan)
+    df['vol_ratio'] = vol_short / vol_long_safe
+    
+    # 4. Hurst Exponent Proxy
+    # Approksimation af om markedet trend'er eller mean-reverter.
+    # Vi sammenligner volatilitet over kort vs lang horisont.
+    # Hvis vol skalerer hurtigere end kvadratroden af tid -> Trend.
+    tau_2 = df['Close'].diff(2).dropna().std()
+    tau_10 = df['Close'].diff(10).dropna().std()
+    # Undgå division med nul
+    if tau_2 == 0: tau_2 = 1e-9
+    
+    # Dette er en statisk værdi for hele datasættet i denne simple form, 
+    # men vi kan lave en rullende version:
+    roll_std_2 = df['Close'].rolling(20).apply(lambda x: np.std(np.diff(x)[::2]), raw=True) # Pseudo
+    # For at holde det hurtigt og robust bruger vi bare en simplere volatilitetsskalering:
+    # Ratio mellem range og std dev er en klassisk Hurst proxy.
+    
+    # Vi bruger en simplere "Trend Strength" indikator her i stedet for fuld Hurst:
+    # Absolut return divideret med summen af absolutte returns (Efficiency)
+    # Dette har vi allerede lidt i 'efficiency_ratio', så vi styrker den med en længere horisont:
+    er_long_period = 30
+    change_long = df['Close'].diff(er_long_period).abs()
+    vol_long_sum = df['Close'].diff().abs().rolling(window=er_long_period).sum()
+    df['efficiency_ratio_long'] = change_long / vol_long_sum.replace(0, np.nan)
+
     # --- RENSNING ---
-    # Fjern rækker med NaN (som opstår pga. rolling windows, især SMA200)
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df.dropna(inplace=True)
 
@@ -237,24 +302,3 @@ def normalize_features(input_df):
     df_scaled = pd.DataFrame(df_scaled_array, columns=df.columns, index=df.index)
     
     return df_scaled, scaler
-
-# Hjælpefunktioner til FracDiff (uændret)
-def get_weights_ffd(d, thres):
-    w, k = [1.], 1
-    while True:
-        w_k = -w[-1] / k * (d - k + 1)
-        if abs(w_k) < thres:
-            break
-        w.append(w_k)
-        k += 1
-    return np.array(w[::-1]).reshape(-1, 1)
-
-def frac_diff_ffd(series, d, thres=1e-3):
-    series = series.dropna()
-    w = get_weights_ffd(d, thres)
-    width = len(w) - 1
-    output = []
-    for i in range(width, len(series)):
-        val = np.dot(w.T, series.iloc[i-width:i+1])[0]
-        output.append(val)
-    return pd.Series(output, index=series.index[width:])

@@ -89,7 +89,7 @@ def make_env(rank, df_features, df_raw, spread=0.0002):
 
 # ... (Imports og helper functions som før) ...
 
-def train_ensemble(n_models=3):
+def train_ensemble(n_models=50):
     print(f"--- Starter Discrete Ensemble Træning ({n_models} Agenter) ---")
     
     df_features, df_raw = load_and_slice_data()
@@ -132,4 +132,4 @@ def train_ensemble(n_models=3):
         env.close()
 
 if __name__ == "__main__":
-    train_ensemble(n_models=5)
+    train_ensemble(n_models=50)

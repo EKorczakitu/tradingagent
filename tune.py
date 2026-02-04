@@ -9,7 +9,7 @@ import torch.nn as nn
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
 from sb3_contrib import RecurrentPPO # We use the Recurrent (LSTM) PPO
 from stable_baselines3.common.evaluation import evaluate_policy
-from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnNoModelImprovement
+from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 
 # --- Local Imports ---
@@ -63,21 +63,35 @@ DF_FEAT_TRAIN, DF_RAW_TRAIN, DF_FEAT_VAL, DF_RAW_VAL = load_data_for_tuning()
 
 def objective(trial):
     """
-    Optuna Objective Function:
-    Suggests hyperparameters -> Trains Agent -> Returns Validation Reward
+    Optuna Objective Function (HPC OPTIMIZED):
+    Tests Architecture, Hyperparams, and LSTM size together.
     """
     
     # --- 1. Suggest Hyperparameters ---
-    learning_rate = trial.suggest_float("learning_rate", 1e-4, 5e-4, log=True)
-    gamma = trial.suggest_float("gamma", 0.90, 0.95)
-    gae_lambda = trial.suggest_float("gae_lambda", 0.95, 1.0)
-    ent_coef = trial.suggest_float("ent_coef", 1e-6, 1e-4, log=True)
+    learning_rate = trial.suggest_float("learning_rate", 1e-5, 5e-4, log=True)
+    gamma = trial.suggest_float("gamma", 0.95, 0.995)
+    gae_lambda = trial.suggest_float("gae_lambda", 0.90, 1.0)
+    ent_coef = trial.suggest_float("ent_coef", 1e-6, 0.01, log=True)
     max_grad_norm = trial.suggest_float("max_grad_norm", 0.3, 1.0)
     
-    # LSTM Specifics
-    n_steps = trial.suggest_categorical("n_steps", [2048, 4096])
-    batch_size = trial.suggest_categorical("batch_size", [512, 1024])
-    lstm_hidden_size = trial.suggest_categorical("lstm_hidden", [64, 128, 256])
+    # --- HPC SCALING: Architecture Search ---
+    # Vi lader Optuna bestemme om netværket skal være lille og hurtigt, eller stort og dybt.
+    net_arch_type = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
+    
+    if net_arch_type == "small":
+        # 2 lag af 64 neuroner (Standard)
+        net_arch = dict(pi=[64, 64], vf=[64, 64])
+    elif net_arch_type == "medium":
+        # 2 lag af 128 neuroner
+        net_arch = dict(pi=[128, 128], vf=[128, 128])
+    elif net_arch_type == "large":
+        # 2 lag af 256 neuroner (Kræver mere data, men kan fange komplekse mønstre)
+        net_arch = dict(pi=[256, 256], vf=[256, 256])
+
+    # LSTM Specifics (Udvidet til HPC)
+    n_steps = trial.suggest_categorical("n_steps", [2048, 4096, 8192])
+    batch_size = trial.suggest_categorical("batch_size", [512, 1024, 2048])
+    lstm_hidden_size = trial.suggest_categorical("lstm_hidden", [128, 256, 512])
     
     # Constraint: Batch size must be a factor of n_steps (or smaller)
     if batch_size > n_steps:
@@ -102,21 +116,18 @@ def objective(trial):
         policy_kwargs=dict(
             enable_critic_lstm=True,
             lstm_hidden_size=lstm_hidden_size,
-            net_arch=dict(pi=[64, 64], vf=[64, 64]),
+            net_arch=net_arch, # <-- Dynamisk arkitektur indsat her
             activation_fn=nn.Tanh
         ),
         verbose=0,
         device="cuda" if torch.cuda.is_available() else "cpu"
     )
     
-
-    
-    
     # --- 4. Train with Early Stopping ---
-    # We train for a shorter period during tuning to save time
     
-    eval_freq = 15000  # <--- Change this from n_steps to 5000
-    eval_freq = max(eval_freq, n_steps)
+    # Vi øger eval_freq fordi n_steps er større.
+    # Vi vil ikke evaluere midt i en rollout.
+    eval_freq = max(20000, n_steps)
     
     eval_callback = EvalCallback(
         val_env, 
@@ -128,26 +139,31 @@ def objective(trial):
     )
     
     try:
-        # Train for 150,000 steps (enough to see if it learns)
-        model.learn(total_timesteps=150000, callback=eval_callback)
+        # Train for 200,000 steps (HPC har råd til lidt længere runs per trial)
+        model.learn(total_timesteps=200000, callback=eval_callback)
     except Exception as e:
         print(f"Trial failed with error: {e}")
-        return -1000 # Return bad score on crash
+        # Returner en meget lav score så Optuna undgår disse parametre
+        return -1000 
         
     # --- 5. Evaluate Performance ---
-    # We use Sharpe Ratio (or Mean Reward) on Validation Set
+    # Vi bruger Mean Reward på Valideringssættet
     mean_reward, std_reward = evaluate_policy(model, val_env, n_eval_episodes=5)
+    
+    # Optuna gemmer også netværks-typen, så vi kan se om "large" er bedre end "small"
+    trial.set_user_attr("net_arch", net_arch_type)
     
     return mean_reward
 
 def run_tuning():
-    print("--- Starting Optuna Tuning ---")
+    print("--- Starting Optuna Tuning (HPC Mode) ---")
     
     # Create study to MAXIMIZE reward
     study = optuna.create_study(direction="maximize")
     
-    # Run 30 trials (increase this if you have time, e.g., 50 or 100)
-    study.optimize(objective, n_trials=20, show_progress_bar=True)
+    # Kør 500 trials. Dette vil tage tid, men med HPC finder vi den bedste model.
+    print("Running 500 trials. This is a brute-force optimization.")
+    study.optimize(objective, n_trials=500, show_progress_bar=True)
     
     print("\n--- Tuning Complete ---")
     print("Best Params:", study.best_params)
@@ -155,6 +171,9 @@ def run_tuning():
     
     # Save best params to file so trade.py can read them
     with open("best_hyperparams.txt", "w") as f:
+        # Vi skal huske at inkludere net_arch logikken i outputtet, 
+        # da best_params kun indeholder "net_arch": "large" (strengen), ikke ordbogen.
+        # Men trade.py skal opdateres til at læse dette (det gør vi i næste trin).
         f.write(str(study.best_params))
         
 if __name__ == "__main__":
