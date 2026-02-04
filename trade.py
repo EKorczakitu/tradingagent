@@ -5,15 +5,13 @@ import numpy as np
 import ast
 import multiprocessing
 import shutil
+from typing import Callable
 
 # --- IMPORTS ----
 from sb3_contrib import RecurrentPPO 
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 from stable_baselines3.common.utils import set_random_seed
-
-# Import schedule helper
-from typing import Callable
 
 import dataloading
 from trading_env import TradingEnv
@@ -22,23 +20,13 @@ from trading_env import TradingEnv
 os.makedirs("models", exist_ok=True)
 os.makedirs("logs", exist_ok=True)
 
-# --- Linear Schedule Helper ---
+# --- Linear Schedule Helper (Bedre konvergens) ---
 def linear_schedule(initial_value: float) -> Callable[[float], float]:
-    """
-    Linear learning rate schedule.
-    :param initial_value: Initial learning rate.
-    :return: schedule that computes current learning rate depending on remaining progress
-    """
     def func(progress_remaining: float) -> float:
-        """
-        Progress will decrease from 1 (beginning) to 0.
-        :param progress_remaining:
-        :return: current learning rate
-        """
         return progress_remaining * initial_value
     return func
 
-# --- Monitoring Callback (Uændret) ---
+# --- Monitoring Callback ---
 class HedgeFundCallback(BaseCallback):
     def __init__(self, check_freq: int, verbose=1):
         super(HedgeFundCallback, self).__init__(verbose)
@@ -52,9 +40,7 @@ class HedgeFundCallback(BaseCallback):
 
         if self.n_calls % self.check_freq == 0 and len(self.returns_buffer) > 0:
             returns = np.array(self.returns_buffer)
-            # Justerer Sharpe faktor til time-level (hvis data er 1H, er faktor sqrt(24*252) ~ sqrt(6000))
-            # Hvis du bruger data med crypto 24/7 er det ca sqrt(365*24) = 93.
-            # Vi holder din faktor for konsistens, men overvej at justere den.
+            # Sharpe faktor for time-data (sqrt(24*252) ≈ 77, men vi bruger din standard)
             ANNUAL_FACTOR = np.sqrt(2000) 
             mean_ret = np.mean(returns)
             std_dev = np.std(returns)
@@ -72,16 +58,14 @@ def load_and_slice_data():
     df_full = dataloading.get_full_dataset()
     VAL_START = pd.Timestamp("2024-01-01", tz="UTC")
     
-    # Train og Val (til eval callback)
+    # Train Data (Til træning)
     df_raw_train = df_full[df_full.index < VAL_START].copy()
     
-    # Vi har brug for et valideringssæt til vores EvalCallback, så agenten måles på nye data
-    # Vi tager 2024 som validering under træningen
+    # Val Data (Til 'Best Model' callback)
     TEST_START = pd.Timestamp("2025-01-01", tz="UTC")
     df_raw_val = df_full[(df_full.index >= VAL_START) & (df_full.index < TEST_START)].copy()
     
     try:
-        # Load både Train og Val features
         df_features_train = pd.read_csv('data/processed_train.csv', index_col=0, parse_dates=True)
         df_features_val = pd.read_csv('data/processed_val.csv', index_col=0, parse_dates=True)
     except FileNotFoundError:
@@ -129,21 +113,20 @@ def make_env(rank, df_features, df_raw, spread=0.0002):
         return env
     return _init
 
-def train_ensemble(n_models=50): # Opdateret default til 50
+def train_ensemble(n_models=50):
     print(f"--- Starter HPC Ensemble Træning ({n_models} Agenter) ---")
     
-    # Load data (Inkl. validation set nu)
     df_feat_train, df_raw_train, df_feat_val, df_raw_val = load_and_slice_data()
     params = get_optimal_params()
     
     current_net_arch = get_net_arch_dict(params.get('net_arch', 'small'))
     
-    # HPC Scaling
+    # HPC Scaling: Brug max kerner men hold lidt fri
     num_cpus = multiprocessing.cpu_count()
     n_envs = min(32, max(8, num_cpus - 2)) 
     print(f"CPU cores: {num_cpus}, bruger {n_envs} envs pr. agent.")
 
-    # Opgraderet Learning Rate med Decay
+    # Learning Rate med Decay (Vigtigt for final performance)
     initial_lr = params['learning_rate']
     lr_schedule = linear_schedule(initial_lr)
 
@@ -154,16 +137,15 @@ def train_ensemble(n_models=50): # Opdateret default til 50
         print(f"============================================")
         set_random_seed(seed)
         
-        # 1. Training Envs (Parallel)
+        # 1. Training Environments (Parallel)
         env = SubprocVecEnv([make_env(k, df_feat_train, df_raw_train) for k in range(n_envs)])
         env = VecMonitor(env)
         
-        # 2. Validation Env (Single - til callback)
-        # Vi bruger val-data til at måle om modellen faktisk lærer noget generelt
+        # 2. Validation Environment (Single - til Checkpoint)
+        # Vi måler agenten på 2024 data løbende. Gemmer KUN hvis den slår rekorden.
         eval_env = SubprocVecEnv([make_env(0, df_feat_val, df_raw_val)])
         eval_env = VecMonitor(eval_env)
         
-        # 3. Setup Callback til at gemme BEDSTE model
         best_model_path = f"models/ensemble_seed_{i}/"
         os.makedirs(best_model_path, exist_ok=True)
         
@@ -171,7 +153,7 @@ def train_ensemble(n_models=50): # Opdateret default til 50
             eval_env,
             best_model_save_path=best_model_path,
             log_path=f"logs/ensemble_{seed}/",
-            eval_freq=max(50000 // n_envs, 1000), # Evaluer hver ~50k steps
+            eval_freq=max(50000 // n_envs, 1000), 
             deterministic=True,
             render=False,
             verbose=0
@@ -183,13 +165,11 @@ def train_ensemble(n_models=50): # Opdateret default til 50
             verbose=1, 
             device="cuda", 
             tensorboard_log=f"./logs/ensemble_{seed}/",
-            
-            learning_rate=lr_schedule, # <-- Bruger decay nu
+            learning_rate=lr_schedule, 
             n_steps=params['n_steps'],
             batch_size=params['batch_size'],
             ent_coef=params['ent_coef'],
             gamma=params['gamma'],
-            
             policy_kwargs=dict(
                 enable_critic_lstm=True, 
                 lstm_hidden_size=params.get('lstm_hidden', 256),
@@ -199,22 +179,20 @@ def train_ensemble(n_models=50): # Opdateret default til 50
         )
         
         try:
-            # Opgraderet til 8 mio steps for sikkerheds skyld
-            # EvalCallback sørger for at vi ikke mister den bedste model, selvom vi træner for længe
+            # 8 Millioner Steps - Vi lader EvalCallback fange det bedste punkt
             model.learn(total_timesteps=8_000_000, callback=eval_callback, progress_bar=True)
             
-            # Efter træning: Hent den bedste model tilbage og gem den som den endelige fil
-            # EvalCallback gemmer som 'best_model.zip'. Vi omdøber den til vores standard.
+            # Restore Best Model
             if os.path.exists(f"{best_model_path}/best_model.zip"):
-                print(f"Fandt bedre checkpoint! Oerstatter final model.")
+                print(f"Succes! Oerstatter final model med 'Best Model' fra validering.")
                 shutil.copy(f"{best_model_path}/best_model.zip", f"models/ppo_ensemble_seed_{i}.zip")
             else:
-                print("Advarsel: Ingen bedre model fundet undervejs, gemmer sidste state.")
+                print("Advarsel: Ingen bedre model fundet (eller validering fejlede), gemmer sidste state.")
                 model.save(f"models/ppo_ensemble_seed_{i}")
                 
         except Exception as e:
-            print(f"FEJL under træning af agent {i}: {e}")
-            continue # Fortsæt til næste agent i stedet for at crashe alt
+            print(f"CRITICAL FEJL ved agent {i}: {e}")
+            continue 
             
         finally:
             env.close()
