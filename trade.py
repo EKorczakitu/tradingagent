@@ -24,9 +24,9 @@ def linear_schedule(initial_value: float) -> Callable[[float], float]:
 def get_optimal_params():
     """Henter hyperparametre eller bruger defaults"""
     default_params = {
-        'learning_rate': 1e-4, 'n_steps': 2048, 'batch_size': 128,
-        'ent_coef': 0.001, 'gamma': 0.99, 'lstm_hidden': 256,
-        'net_arch': 'small' # 'small', 'medium', 'large'
+        'learning_rate': 1e-4, 'n_steps': 2048, 'batch_size': 256,
+        'ent_coef': 0.001, 'gamma': 0.99, 'lstm_hidden': 512,
+        'net_arch': 'medium' # 'small', 'medium', 'large'
     }
     if os.path.exists("best_hyperparams.txt"):
         try:
@@ -105,7 +105,7 @@ def train_agent(train_df, val_df, raw_prices_train, raw_prices_val):
     print("--- Starter Træning ---")
     try:
         # Kør 5 millioner steps (juster efter behov på HPC)
-        model.learn(total_timesteps=5_000_000, callback=eval_callback, progress_bar=True)
+        model.learn(total_timesteps=20_000_000, callback=eval_callback, progress_bar=True)
     except KeyboardInterrupt:
         print("Træning stoppet manuelt. Gemmer status...")
     

@@ -76,7 +76,7 @@ def objective(trial):
     
     # --- HPC SCALING: Architecture Search ---
     # Vi lader Optuna bestemme om netværket skal være lille og hurtigt, eller stort og dybt.
-    net_arch_type = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
+    net_arch_type = trial.suggest_categorical("net_arch", ["small", "medium", "large", "xlarge"])
     
     if net_arch_type == "small":
         # 2 lag af 64 neuroner (Standard)
@@ -87,11 +87,14 @@ def objective(trial):
     elif net_arch_type == "large":
         # 2 lag af 256 neuroner (Kræver mere data, men kan fange komplekse mønstre)
         net_arch = dict(pi=[256, 256], vf=[256, 256])
+    elif net_arch_type == "xlarge":
+        # 3 lag af 512 neuroner (Maksimal kapacitet for HPC)
+        net_arch = dict(pi=[512, 512, 512], vf=[512,512,512])
 
     # LSTM Specifics (Udvidet til HPC)
     n_steps = trial.suggest_categorical("n_steps", [2048, 4096, 8192])
     batch_size = trial.suggest_categorical("batch_size", [512, 1024, 2048])
-    lstm_hidden_size = trial.suggest_categorical("lstm_hidden", [128, 256, 512])
+    lstm_hidden_size = trial.suggest_categorical("lstm_hidden", [128, 256, 512, 1024])
     
     # Constraint: Batch size must be a factor of n_steps (or smaller)
     if batch_size > n_steps:
