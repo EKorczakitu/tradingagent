@@ -32,10 +32,15 @@ def get_full_dataset():
     Combines ALL history (2016-2025) into one DataFrame.
     This allows the Pipeline to do 'Walk-Forward' splitting.
     """
+    # files = [
+    #     "NOVOB.DKDKK_Candlestick_1_Hour_BID_08.11.2016-31.12.2023.csv",
+    #     "NOVOB.DKDKK_Candlestick_1_Hour_BID_01.01.2024-31.12.2024.csv",
+    #     "NOVOB.DKDKK_Candlestick_1_Hour_BID_01.01.2025-31.12.2025.csv"
+    # ]
     files = [
-        "NOVOB.DKDKK_Candlestick_1_Hour_BID_08.11.2016-31.12.2023.csv",
-        "NOVOB.DKDKK_Candlestick_1_Hour_BID_01.01.2024-31.12.2024.csv",
-        "NOVOB.DKDKK_Candlestick_1_Hour_BID_01.01.2025-31.12.2025.csv"
+        "EURUSD_Candlestick_1_Hour_BID_01.01.2010-31.12.2019.csv",
+        "EURUSD_Candlestick_1_Hour_BID_01.01.2020-31.12.2021.csv",
+        "EURUSD_Candlestick_1_Hour_BID_01.01.2022-31.12.2025.csv"
     ]
     
     dfs = []

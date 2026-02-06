@@ -1,156 +1,93 @@
-from statsmodels.tsa.stattools import adfuller
-from sklearn.decomposition import PCA
-from sklearn.feature_selection import RFE
-from sklearn.inspection import permutation_importance
 import pandas as pd
 import numpy as np
-import xgboost as xgb
-import matplotlib.pyplot as plt
+from sklearn.feature_selection import RFE
+from sklearn.linear_model import Lasso, LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.inspection import permutation_importance
+from sklearn.model_selection import TimeSeriesSplit
 
-def feature_selection_funnel(input_df, method='rfe', n_components_pca=0.95, top_k_features=50):
+def feature_selection_funnel(df_train, method='permutation', top_k_features=50):
     """
-    Avanceret Feature Selection Funnel til HPC.
+    Vælger de bedste features baseret på metoden.
     
-    Methods:
-      - 'rfe': Recursive Feature Elimination (Langsom, men meget præcis).
-      - 'permutation': Permutation Importance (Robust mod overfitting).
-      - 'xgboost': Standard feature importance (Hurtig baseline).
+    Args:
+        df_train: Træningsdata (features + target implicit i logikken hvis nødvendigt)
+                  Bemærk: Her antager vi df_train kun er features, eller vi skal generere et target.
+                  I TradingAgent setup genererer vi ofte et midlertidigt target (f.eks. næste bars retning)
+                  for at måle feature importance.
+        method: 'rfe' eller 'permutation'
+        top_k_features: Antal features vi vil beholde.
     """
-    df = input_df.copy()
-    dropped_log = {} 
     
-    # 1. CRASH FIX: Save 'Close' for later target calculation
-    if 'Close' in input_df.columns:
-        close_price_reference = input_df['Close'].copy()
+    # 1. Opret et midlertidigt Target (Y) for at måle importance
+    # Vi vil forudsige om prisen stiger eller falder i næste bar
+    # (Dette matcher hvad PPO agenten ofte lærer implicit)
+    X = df_train.copy()
+    
+    # Antag at 'log_ret' findes, ellers brug Close diff. 
+    # Vi shifter -1 for at forudsige NÆSTE step.
+    if 'log_ret' in X.columns:
+        y_raw = X['log_ret'].shift(-1)
     else:
-        # Fallback hvis Close er blevet scaleret væk eller omdøbt
-        close_price_reference = df.iloc[:, 0].copy() 
-
-    print(f"Startede med {len(df.columns)} features.")
-
-    # --- TRIN 1: Stationarity Filter (ADF Test) ---
-    non_stationary_cols = []
+        # Fallback
+        y_raw = X['Close'].pct_change().shift(-1)
+        
+    y = (y_raw > 0).astype(int) # 1 hvis op, 0 hvis ned
     
-    # FEATURES WE REFUSE TO DELETE (The "Gold" List)
-    WHITELIST = ['frac_diff_close', 'vol_regime', 'rsi_14', 'z_score', 'linreg_slope']
+    # Fjern rækker med NaNs (pga. shift)
+    X = X.iloc[:-1]
+    y = y.iloc[:-1]
     
-    print("\n--- Kører ADF Test (Stationarity) ---")
+    # Sørg for at index matcher
+    common_idx = X.index.intersection(y.index)
+    X = X.loc[common_idx]
+    y = y.loc[common_idx]
     
-    for col in df.columns:
-        if col in WHITELIST:
-            print(f"  [KEEP] {col} er whitelistet (skipper test)")
-            continue
-            
-        try:
-            # CRITICAL FIX: Drop NaNs/Infs before passing to ADF
-            clean_series = df[col].replace([np.inf, -np.inf], np.nan).dropna()
-            
-            if len(clean_series) < 20: # Skip if empty
-                non_stationary_cols.append(col)
-                continue
-
-            result = adfuller(clean_series.values)
-            p_value = result[1]
-            
-            if p_value > 0.05:
-                non_stationary_cols.append(col)
-                
-        except Exception as e:
-            print(f"  [ERROR] Kunne ikke teste {col}: {e}")
-            non_stationary_cols.append(col)
-
-    if non_stationary_cols:
-        print(f"Fjerner {len(non_stationary_cols)} features: {non_stationary_cols}")
-        df.drop(columns=non_stationary_cols, inplace=True)
-        dropped_log['non_stationary'] = non_stationary_cols
-    else:
-        print("Alle features bestod.")
-
-    # --- TRIN 2: Correlation Filter ---
-    print("\n--- Kører Correlation Filter ---")
-    corr_matrix = df.corr().abs()
-    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-    to_drop = [column for column in upper.columns if any(upper[column] > 0.95)]
+    print(f"Feature Selection running on {len(X)} rows with method: {method.upper()}")
     
-    # Don't drop whitelisted features even if correlated
-    to_drop = [c for c in to_drop if c not in WHITELIST]
-    
-    if to_drop:
-        print(f"Fjerner {len(to_drop)} dubletter: {to_drop}")
-        df.drop(columns=to_drop, inplace=True)
-        dropped_log['high_correlation'] = to_drop
-
-    # --- TRIN 3: Model-Based Selection (HPC POWER) ---
-    final_df = None
-    
-    # Forbered data til model
-    LOOK_AHEAD = 6
-    target = (close_price_reference.shift(-LOOK_AHEAD) > close_price_reference).astype(int)
-    
-    # Juster X og y længder
-    X = df.iloc[:-LOOK_AHEAD]
-    y = target.iloc[:-LOOK_AHEAD]
-    
-    model = xgb.XGBClassifier(
-        n_estimators=100, 
-        eval_metric='logloss',
-        tree_method='hist', # Hurtigere på store datasæt
-        device='cuda' if method != 'rfe' else 'cpu' # RFE kan drille med GPU contexts i loops
-    )
-
     selected_features = []
-
+    
     if method == 'rfe':
-        print(f"\n--- Kører Recursive Feature Elimination (RFE) til {top_k_features} features ---")
-        print("Dette kan tage tid, men giver det bedste resultat...")
-        
-        # RFE træner modellen, fjerner dårligste feature, og gentager.
-        rfe = RFE(estimator=model, n_features_to_select=top_k_features, step=1)
+        # Den gamle metode (Hurtig, men ofte for lineær)
+        model = LogisticRegression(solver='liblinear', penalty='l1', C=0.1)
+        rfe = RFE(estimator=model, n_features_to_select=top_k_features, step=0.1)
         rfe.fit(X, y)
-        
-        selected_features = X.columns[rfe.support_].tolist()
-        print(f"RFE valgte {len(selected_features)} features.")
+        selected_mask = rfe.support_
+        selected_features = X.columns[selected_mask].tolist()
         
     elif method == 'permutation':
-        print(f"\n--- Kører Permutation Importance ---")
-        
-        # Fit modellen først
+        # Den NYE metode (Bedre til AI/Non-lineær)
+        # Vi bruger Random Forest da den fanger ikke-lineære sammenhænge (som PPO gør)
+        model = RandomForestClassifier(
+            n_estimators=100, 
+            max_depth=5, 
+            n_jobs=-1, 
+            random_state=42
+        )
         model.fit(X, y)
         
-        # Kør permutation (kræver valideringsdata for at være ægte, men vi bruger training her for selection)
-        result = permutation_importance(model, X, y, n_repeats=5, random_state=42, n_jobs=-1)
+        # Beregn Permutation Importance
+        # n_repeats=5 er et godt kompromis mellem fart og præcision
+        r = permutation_importance(model, X, y, n_repeats=5, random_state=42, n_jobs=-1)
         
-        # Sorter features baseret på 'importances_mean'
-        perm_sorted_idx = result.importances_mean.argsort()[::-1]
+        # Lav en DataFrame med scores
+        importance_df = pd.DataFrame({
+            'Feature': X.columns,
+            'Importance': r.importances_mean
+        }).sort_values(by='Importance', ascending=False)
         
-        # Vælg top K
-        top_indices = perm_sorted_idx[:top_k_features]
-        selected_features = X.columns[top_indices].tolist()
+        # Vælg toppen
+        selected_features = importance_df.head(top_k_features)['Feature'].tolist()
         
-        print("Top 5 Permutation Features:")
-        for i in top_indices[:5]:
-            print(f"{X.columns[i]}: {result.importances_mean[i]:.4f}")
+        print("\nTop 5 Vigtigste Features (Permutation):")
+        print(importance_df.head(5).to_string(index=False))
 
-    else: # method == 'xgboost' (Legacy fast mode)
-        print("\n--- Kører Standard XGBoost Selection ---")
-        model.fit(X, y)
-        feature_imp = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=False)
-        selected_features = feature_imp.head(top_k_features).index.tolist()
-        
-        print("XGBoost Top Features:")
-        print(feature_imp.head(10))
+    else:
+        # Fallback: Brug alle
+        selected_features = X.columns.tolist()
 
-    # --- FINAL: Whitelist Check & Construction ---
+    # Returner kun de valgte kolonner
+    df_selected = df_train[selected_features].copy()
+    dropped_log = [c for c in df_train.columns if c not in selected_features]
     
-    # FORCE ADD WHITELIST hvis de mangler (Sikkerhedsnet)
-    for w in WHITELIST:
-        if w in df.columns and w not in selected_features:
-            print(f"  -> Redder {w} ind i Top Features (Force Add)")
-            selected_features.append(w)
-    
-    # Fjern eventuelle dubletter i listen
-    selected_features = list(set(selected_features))
-    
-    final_df = df[selected_features]
-    
-    return final_df, dropped_log
+    return df_selected, dropped_log
