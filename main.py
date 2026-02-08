@@ -133,7 +133,7 @@ def run_pipeline():
     print("\n--- 5. TRAINING ENSEMBLE (9 RANDOM SEEDS) ---")
     
     ensemble_models = []
-    n_models = 9
+    n_models = 7
     
     # Opret mappe til ensemble modeller hvis den ikke findes
     os.makedirs(MODEL_SAVE_PATH, exist_ok=True)

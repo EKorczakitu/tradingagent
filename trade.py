@@ -65,9 +65,18 @@ def train_agent(train_df, val_df, raw_prices_train, raw_prices_val, seed=None):
     net_arch = get_net_arch(params.get('net_arch', 'small'))
     
     # Setup HPC Multiprocessing
-    num_cpus = multiprocessing.cpu_count()
-    # Vi bruger lidt færre environments pr. model når vi kører ensemble for ikke at dræbe RAM
-    n_envs = min(8, max(2, num_cpus - 2)) 
+    try:
+        # On Linux/HPC, this gets the specific number of cores SLURM gave you
+        num_cpus = len(os.sched_getaffinity(0))
+    except AttributeError:
+        # Fallback for Windows/Mac
+        num_cpus = multiprocessing.cpu_count()
+    
+    print(f"SLURM allocated {num_cpus} CPUs for this job.")
+
+    # We use fewer environments per model to save RAM/Overhead
+    # Recommended: Keep n_envs between 4 and 16 for PPO
+    n_envs = min(16, max(2, num_cpus - 1))
     
     # Opret Training Environment med seed offsets
     env = SubprocVecEnv([make_env(i, train_df, raw_prices_train, seed=(seed or 0)) for i in range(n_envs)])

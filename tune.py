@@ -115,7 +115,7 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
     
     # Kør 500 trials (HPC mode). Juster n_trials ned, hvis du vil teste hurtigere.
     print("Running 500 trials. This is a brute-force optimization.")
-    study.optimize(objective, n_trials=500, show_progress_bar=True)
+    study.optimize(objective, n_trials=50, show_progress_bar=True)
     
     print("\n--- Tuning Complete ---")
     print("Best Params:", study.best_params)
