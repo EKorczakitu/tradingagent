@@ -1,0 +1,10 @@
+# Ignorer mapper med modeller og logs
+models/
+logs/
+
+# Ignorer store zip filer
+*.zip
+
+# Ignorer python cache
+__pycache__/
+*.pyc
