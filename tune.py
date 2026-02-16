@@ -12,6 +12,9 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 
+from stable_baselines3.common.vec_env import SubprocVecEnv # Tilføjet
+import multiprocessing
+
 # --- Local Imports ---
 from trading_env import TradingEnv
 
@@ -54,12 +57,17 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
         # Constraint: Batch size must be a factor of n_steps (or smaller)
         if batch_size > n_steps:
             batch_size = n_steps
-
+        import os
+        n_cores = len(os.sched_getaffinity(0))
+        n_envs = min(8, n_cores - 1)
         # --- 2. Setup Environments ---
         # Vi bruger dataframes sendt fra main.py
-        train_env = DummyVecEnv([lambda: TradingEnv(train_feat, train_prices)])
+        # Brug SubprocVecEnv i stedet for DummyVecEnv for hastighed!
+        def make_env():
+            return TradingEnv(train_feat, train_prices)
+            
+        train_env = SubprocVecEnv([make_env for _ in range(n_envs)])
         val_env = DummyVecEnv([lambda: Monitor(TradingEnv(val_feat, val_prices))])
-        
         # --- 3. Define Model (RecurrentPPO) ---
         model = RecurrentPPO(
             "MlpLstmPolicy",
@@ -94,11 +102,13 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
         )
         
         try:
-            # Vi kører lidt færre steps pr. trial i tuning for at spare tid, eller du kan beholde 500k
             model.learn(total_timesteps=500000, callback=eval_callback)
         except Exception as e:
-            print(f"Trial failed with error: {e}")
+            print(f"Trial failed: {e}")
             return -1000 
+        finally:
+            # DETTE ER KRITISK: Lukker alle subprocesser og sletter temp-filer!
+            train_env.close()
             
         # --- 5. Evaluate Performance ---
         mean_reward, _ = evaluate_policy(model, val_env, n_eval_episodes=5)
@@ -111,7 +121,11 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
     print("--- Starting Optuna Study ---")
     
     # Create study to MAXIMIZE reward
-    study = optuna.create_study(direction="maximize")
+    # Stopper automatisk dårlige forsøg baseret på tidligere resultater
+    study = optuna.create_study(
+        direction="maximize",
+        pruner=optuna.pruners.MedianPruner()
+    )
     
     # Kør 500 trials (HPC mode). Juster n_trials ned, hvis du vil teste hurtigere.
     print("Running 500 trials. This is a brute-force optimization.")
