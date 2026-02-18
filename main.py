@@ -8,7 +8,24 @@ import trading_env
 import backtest
 import trade
 import tune 
+import shutil
+import sys
 
+# --- HARDCORE SIKKERHED MOD TMP FEJL ---
+# Tjek om vi kører på HPC (hvis TMPDIR er sat)
+if "TMPDIR" in os.environ:
+    # Sikr at vi IKKE bruger home-mappen
+    if os.environ["TMPDIR"].startswith("/home"):
+        print(f"CRITICAL WARNING: TMPDIR is set to {os.environ['TMPDIR']} (Network Drive).")
+        print("This WILL cause crashes. Please fix run_ensemble.sh to use /tmp/...")
+        # Vi prøver at redde den ved at tvinge den over på lokal disk hvis muligt
+        local_tmp = f"/tmp/{os.environ.get('USER', 'user')}/fallback_job"
+        os.makedirs(local_tmp, exist_ok=True)
+        os.environ["TMPDIR"] = local_tmp
+        os.environ["JOBLIB_TEMP_FOLDER"] = local_tmp
+        print(f"FORCED SWITCH to local disk: {local_tmp}")
+
+print(f"Running with TMPDIR: {os.environ.get('TMPDIR', 'Not Set')}")
 # Settings
 MODEL_SAVE_PATH = "models/ppo_ensemble" # Mappe til at gemme alle modeller
 TEST_START_DATE = "2025-01-01"
