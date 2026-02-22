@@ -14,12 +14,13 @@ class TradingEnv(gym.Env):
         super(TradingEnv, self).__init__()
         
         self.features_data = df_features.values.astype(np.float32)
-        self.prices_data = df_raw['Close'].values.astype(np.float32)
+        self.close_prices = df_raw['Close'].values.astype(np.float32)
+        self.open_prices = df_raw['Open'].values.astype(np.float32)
         
-        # Pre-calculate Log Returns
-        self.market_log_returns = np.zeros(len(self.prices_data), dtype=np.float32)
-        self.market_log_returns[:-1] = np.log(self.prices_data[1:] / (self.prices_data[:-1] + 1e-9))
-        
+        # Calculate realistically executable returns: Enter at Open[t+1], Exit at Close[t+1]
+        self.market_log_returns = np.zeros(len(self.close_prices), dtype=np.float32)
+        self.market_log_returns[:-1] = np.log(self.close_prices[1:] / (self.open_prices[1:] + 1e-9))
+        self.prices_data = self.close_prices
         # Pre-calculate Volatility for Dynamic Slippage
         # (Vi bruger rullende std på raw returns som proxy for markedsuro)
         raw_ret = np.diff(self.prices_data) / (self.prices_data[:-1] + 1e-9)
@@ -79,26 +80,18 @@ class TradingEnv(gym.Env):
         new_balance = current_balance * np.exp(net_return)
         self.balance_history.append(new_balance)
 
-        # --- SORTINO REWARD ---
-        self.returns_memory.append(net_return)
-        if len(self.returns_memory) > self.memory_len: 
-            self.returns_memory.pop(0)
-            
-        recent = np.array(self.returns_memory)
-        
-        # Find Downside Deviation (Negative afkast)
-        neg_ret = recent[recent < 0]
-        if len(neg_ret) > 1:
-            downside_risk = np.std(neg_ret)
+        # --- ASYMMETRIC STEP REWARD (FIX 3) ---
+        # Instead of a rolling Sortino ratio, we penalize losses more heavily than gains.
+        # This naturally forces the PPO agent to become risk-averse without mathematically breaking the RL objective.
+        if net_return < 0:
+            # Penalize losses heavily (e.g., 2.5x multiplier on negative returns)
+            reward = net_return * 2.5 * 100.0
         else:
-            downside_risk = 0.01 # Fallback
+            # Normal reward for gains
+            reward = net_return * 100.0
             
-        risk = max(downside_risk, 0.0001)
-        
-        # Reward: Afkast divideret med downside risiko (Sortino-ish)
-        # Multiplicer med 100 for at skalere til Neural Network venlige tal
-        reward = (net_return / risk) * 100.0
-        reward = np.clip(reward, -10, 10)
+        # Multipliceret med 100.0 ovenfor for at skalere til Neural Network venlige tal
+        reward = np.clip(reward, -10.0, 10.0)
         
         self.position = target_position
         self.current_step += 1
