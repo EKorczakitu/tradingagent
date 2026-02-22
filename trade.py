@@ -79,7 +79,7 @@ def train_agent(train_df, val_df, raw_prices_train, raw_prices_val, seed=None):
     n_envs = min(16, max(2, num_cpus - 1))
     
     # Opret Training Environment med seed offsets
-print(f"Running on 1 core per environment (DummyVecEnv) for stability.")
+    print(f"Running on 1 core per environment (DummyVecEnv) for stability.")
 
     # Opret Training Environment (Kun DummyVecEnv)
     env = DummyVecEnv([make_env(0, train_df, raw_prices_train, seed=(seed or 0))])
