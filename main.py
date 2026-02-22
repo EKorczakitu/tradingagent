@@ -107,16 +107,18 @@ def run_pipeline():
     
     print(f"Cleaned shapes -> Train: {X_train_scaled.shape}, Val: {X_val_scaled.shape}, Test: {X_test_scaled.shape}")
 
-    # --- TRIN 4: FEATURE SELECTION ---
-    print("\n--- 4. FEATURE SELECTION (PERMUTATION) ---")
-    train_final, dropped_cols = feature_selection.feature_selection_funnel(
-        X_train_scaled, 
-        method='permutation', 
-        top_k_features=50
-    )
+# --- TRIN 4: FEATURE SELECTION (VARIANCE THRESHOLD) ---
+    print("\n--- 4. FEATURE SELECTION (KEEPING CONTEXT) ---")
+    from sklearn.feature_selection import VarianceThreshold
     
-    selected_cols = train_final.columns.tolist()
+    # Vi fjerner kun features der absolut ingen varians har (konstante værdier)
+    # Dette sikrer at vores LSTM bevarer kontekst som f.eks. makro-trends og volatilitetsregimer
+    selector = VarianceThreshold(threshold=0.001)
+    selector.fit(X_train_scaled)
     
+    selected_cols = X_train_scaled.columns[selector.get_support()].tolist()
+    
+    train_final = X_train_scaled[selected_cols].copy()
     val_final  = X_val_scaled.loc[X_val_scaled.index.intersection(X_val_scaled.index), selected_cols]
     test_final = X_test_scaled.loc[X_test_scaled.index.intersection(X_test_scaled.index), selected_cols]
     
@@ -132,7 +134,7 @@ def run_pipeline():
     assert len(train_final) == len(prices_train_aligned), "CRITICAL: Train Features/Prices length mismatch!"
     assert len(val_final) == len(prices_val_aligned), "CRITICAL: Val Features/Prices length mismatch!"
     
-    print(f"Selected {len(selected_cols)} features.")
+    print(f"Selected {len(selected_cols)} features (dropped {len(X_train_scaled.columns) - len(selected_cols)} flat features).")
 
     # --- TRIN 4.8: HYPERPARAMETER TUNING ---
     print("\n--- 4.8. RUNNING HYPERPARAMETER TUNING (ONCE) ---")
