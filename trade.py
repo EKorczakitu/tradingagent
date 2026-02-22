@@ -79,19 +79,22 @@ def train_agent(train_df, val_df, raw_prices_train, raw_prices_val, seed=None):
     n_envs = min(16, max(2, num_cpus - 1))
     
     # Opret Training Environment med seed offsets
-    env = SubprocVecEnv([make_env(i, train_df, raw_prices_train, seed=(seed or 0)) for i in range(n_envs)])
+print(f"Running on 1 core per environment (DummyVecEnv) for stability.")
+
+    # Opret Training Environment (Kun DummyVecEnv)
+    env = DummyVecEnv([make_env(0, train_df, raw_prices_train, seed=(seed or 0))])
     env = VecMonitor(env, filename=f"{LOG_DIR}/monitor_train_{seed}")
 
     # Opret Validation Environment
-    eval_env = SubprocVecEnv([make_env(0, val_df, raw_prices_val, seed=(seed or 0))])
+    eval_env = DummyVecEnv([make_env(0, val_df, raw_prices_val, seed=(seed or 0))])
     eval_env = VecMonitor(eval_env, filename=f"{LOG_DIR}/monitor_val_{seed}")
 
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=f"{MODEL_DIR}/seed_{seed}" if seed is not None else MODEL_DIR,
         log_path=LOG_DIR,
-        eval_freq=max(100000 // n_envs, 10000), # Sat voldsomt op så den evaluerer mindre
-        n_eval_episodes=1,                      # <--- KRITISK: Sæt til 1
+        eval_freq=10000, # Fast evaluering for hurtigt at se resultater
+        n_eval_episodes=1,
         deterministic=True,
         render=False,
         verbose=0
