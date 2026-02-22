@@ -34,7 +34,7 @@ class TradingEnv(gym.Env):
         self.action_space = spaces.Discrete(3)
         
         self.observation_space = spaces.Box(
-            low=-10.0, high=10.0, 
+            low=-np.inf, high=np.inf, 
             shape=(self.features_data.shape[1],), 
             dtype=np.float32
         )
