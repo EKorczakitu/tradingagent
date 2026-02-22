@@ -46,13 +46,11 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
             net_arch = dict(pi=[128, 128], vf=[128, 128])
         elif net_arch_type == "large":
             net_arch = dict(pi=[256, 256], vf=[256, 256])
-        elif net_arch_type == "xlarge":
-            net_arch = dict(pi=[512, 512, 512], vf=[512,512,512])
 
         # LSTM Specifics
         n_steps = trial.suggest_categorical("n_steps", [2048, 4096, 8192])
         batch_size = trial.suggest_categorical("batch_size", [512, 1024, 2048])
-        lstm_hidden_size = trial.suggest_categorical("lstm_hidden", [128, 256, 512, 1024])
+        lstm_hidden_size = trial.suggest_categorical("lstm_hidden", [128, 256, 512])
         
         # Constraint: Batch size must be a factor of n_steps (or smaller)
         if batch_size > n_steps:
@@ -90,13 +88,14 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
         )
         
         # --- 4. Train with Early Stopping ---
-        eval_freq = max(25000, n_steps)
+        eval_freq = max(100000 // max(1, n_envs), 10000) 
         
         eval_callback = EvalCallback(
             val_env, 
             best_model_save_path=None,
             log_path=None, 
             eval_freq=eval_freq,
+            n_eval_episodes=1,     # <--- KRITISK: Sæt til 1!
             deterministic=True, 
             render=False
         )
@@ -111,7 +110,7 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
             train_env.close()
             
         # --- 5. Evaluate Performance ---
-        mean_reward, _ = evaluate_policy(model, val_env, n_eval_episodes=5)
+        mean_reward, _ = evaluate_policy(model, val_env, n_eval_episodes=1) # <--- Sæt til 1 her også
         
         # Gem net_arch typen så vi kan bruge den senere
         trial.set_user_attr("net_arch", net_arch_type)
