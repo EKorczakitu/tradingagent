@@ -38,6 +38,8 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
             net_arch = dict(pi=[128, 128], vf=[128, 128])
         elif net_arch_type == "large":
             net_arch = dict(pi=[256, 256], vf=[256, 256])
+        elif net_arch_type == "xlarge":
+            net_arch = dict(pi=[512, 512, 512], vf=[512, 512, 512])
 
         n_steps = trial.suggest_categorical("n_steps", [2048, 4096, 8192])
         batch_size = trial.suggest_categorical("batch_size", [512, 1024, 2048])
