@@ -43,29 +43,27 @@ class EnsembleModel:
         print(f"Ensemble initialized with {len(models)} models.")
 
     def predict(self, obs, state=None, episode_start=None, deterministic=True):
-        # state parameteren er her en liste af states (én for hver model)
-        # Hvis state er None (første step), laver vi en liste af Nones
+        from scipy import stats # Import this at the top of main.py
+        
         if state is None:
             state = [None] * len(self.models)
         
         all_actions = []
         new_states = []
         
-        # Iterer gennem hver model og dens tilhørende state
         for i, model in enumerate(self.models):
-            # Hent model-specifik state
             model_state = state[i]
-            
-            # Predict
             action, next_state = model.predict(obs, state=model_state, episode_start=episode_start, deterministic=deterministic)
             
             all_actions.append(action)
             new_states.append(next_state)
             
-        # SOFT VOTING: Gennemsnit af actions på tværs af modeller (axis 0)
-        avg_action = np.mean(all_actions, axis=0)
+        # HARD VOTING: Use the mode (most frequent action) across models
+        # all_actions shape is (num_models, num_envs). We find mode along axis 0.
+        mode_result = stats.mode(all_actions, axis=0, keepdims=False)
+        final_action = mode_result.mode
         
-        return avg_action, new_states
+        return final_action, new_states
 
     def save(self, path):
         # Vi gemmer ikke selve ensemble objektet, men vi antager at modellerne er gemt individuelt
