@@ -99,7 +99,7 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
     study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
     
     # KUN 2 TRIALS TIL TEST
-    study.optimize(objective, n_trials=2, show_progress_bar=True)
+    study.optimize(objective, n_trials=1, show_progress_bar=True)
     
     print("\n--- Tuning Complete ---")
     print("Best Params:", study.best_params)

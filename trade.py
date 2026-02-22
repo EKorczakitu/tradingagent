@@ -4,10 +4,11 @@ import ast
 import torch.nn as nn
 from typing import Callable
 from sb3_contrib import RecurrentPPO 
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecMonitor, DummyVecEnv
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.utils import set_random_seed # Vigtig
 from trading_env import TradingEnv
+
 
 # Settings
 LOG_DIR = "logs/PPO_Agent"
