@@ -90,7 +90,8 @@ def train_agent(train_df, val_df, raw_prices_train, raw_prices_val, seed=None):
         eval_env,
         best_model_save_path=f"{MODEL_DIR}/seed_{seed}" if seed is not None else MODEL_DIR,
         log_path=LOG_DIR,
-        eval_freq=max(20000 // n_envs, 1000),
+        eval_freq=max(100000 // n_envs, 10000), # Sat voldsomt op så den evaluerer mindre
+        n_eval_episodes=1,                      # <--- KRITISK: Sæt til 1
         deterministic=True,
         render=False,
         verbose=0
