@@ -19,17 +19,10 @@ import multiprocessing
 from trading_env import TradingEnv
 
 def run_tuning(train_feat, val_feat, train_prices, val_prices):
-    """
-    Kører Optuna tuning på de dataframes, der leveres fra main.py pipeline.
-    """
     print("\n--- Starting Optuna Tuning (HPC Mode) ---")
     print(f"Tuning Input Data -> Train: {train_feat.shape}, Val: {val_feat.shape}")
     
     def objective(trial):
-        """
-        Optuna Objective Function (Closure der har adgang til dataframes)
-        """
-        
         # --- 1. Suggest Hyperparameters ---
         learning_rate = trial.suggest_float("learning_rate", 1e-5, 5e-4, log=True)
         gamma = trial.suggest_float("gamma", 0.95, 0.995)
@@ -37,7 +30,6 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
         ent_coef = trial.suggest_float("ent_coef", 1e-6, 0.01, log=True)
         max_grad_norm = trial.suggest_float("max_grad_norm", 0.3, 1.0)
         
-        # --- HPC SCALING: Architecture Search ---
         net_arch_type = trial.suggest_categorical("net_arch", ["small", "medium", "large", "xlarge"])
         
         if net_arch_type == "small":
@@ -47,26 +39,18 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
         elif net_arch_type == "large":
             net_arch = dict(pi=[256, 256], vf=[256, 256])
 
-        # LSTM Specifics
         n_steps = trial.suggest_categorical("n_steps", [2048, 4096, 8192])
         batch_size = trial.suggest_categorical("batch_size", [512, 1024, 2048])
         lstm_hidden_size = trial.suggest_categorical("lstm_hidden", [128, 256, 512])
         
-        # Constraint: Batch size must be a factor of n_steps (or smaller)
         if batch_size > n_steps:
             batch_size = n_steps
-        import os
-        n_cores = len(os.sched_getaffinity(0))
-        n_envs = min(8, n_cores - 1)
-        # --- 2. Setup Environments ---
-        # Vi bruger dataframes sendt fra main.py
-        # Brug SubprocVecEnv i stedet for DummyVecEnv for hastighed!
-        def make_env():
-            return TradingEnv(train_feat, train_prices)
-            
-        train_env = SubprocVecEnv([make_env for _ in range(n_envs)])
+
+        # --- 2. Setup Environments (Nu 100% DummyVecEnv med Monitor) ---
+        train_env = DummyVecEnv([lambda: Monitor(TradingEnv(train_feat, train_prices))])
         val_env = DummyVecEnv([lambda: Monitor(TradingEnv(val_feat, val_prices))])
-        # --- 3. Define Model (RecurrentPPO) ---
+
+        # --- 3. Define Model ---
         model = RecurrentPPO(
             "MlpLstmPolicy",
             train_env,
@@ -88,57 +72,40 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
         )
         
         # --- 4. Train with Early Stopping ---
-        eval_freq = max(100000 // max(1, n_envs), 10000) 
-        
         eval_callback = EvalCallback(
             val_env, 
             best_model_save_path=None,
             log_path=None, 
-            eval_freq=eval_freq,
-            n_eval_episodes=1,     # <--- KRITISK: Sæt til 1!
+            eval_freq=10000,
+            n_eval_episodes=1,
             deterministic=True, 
             render=False
         )
         
         try:
-            model.learn(total_timesteps=500000, callback=eval_callback)
+            model.learn(total_timesteps=100000, callback=eval_callback) # Hurtig test
         except Exception as e:
             print(f"Trial failed: {e}")
             return -1000 
         finally:
-            # DETTE ER KRITISK: Lukker alle subprocesser og sletter temp-filer!
             train_env.close()
             
         # --- 5. Evaluate Performance ---
-        mean_reward, _ = evaluate_policy(model, val_env, n_eval_episodes=1) # <--- Sæt til 1 her også
-        
-        # Gem net_arch typen så vi kan bruge den senere
+        mean_reward, _ = evaluate_policy(model, val_env, n_eval_episodes=1)
         trial.set_user_attr("net_arch", net_arch_type)
-        
         return mean_reward
 
     print("--- Starting Optuna Study ---")
+    study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
     
-    # Create study to MAXIMIZE reward
-    # Stopper automatisk dårlige forsøg baseret på tidligere resultater
-    study = optuna.create_study(
-        direction="maximize",
-        pruner=optuna.pruners.MedianPruner()
-    )
-    
-    # Kør 500 trials (HPC mode). Juster n_trials ned, hvis du vil teste hurtigere.
-    print("Running 500 trials. This is a brute-force optimization.")
-    study.optimize(objective, n_trials=50, show_progress_bar=True)
+    # KUN 2 TRIALS TIL TEST
+    study.optimize(objective, n_trials=2, show_progress_bar=True)
     
     print("\n--- Tuning Complete ---")
     print("Best Params:", study.best_params)
-    print("Best Value:", study.best_value)
     
-    # Save best params to file so trade.py can read them automatically
     with open("best_hyperparams.txt", "w") as f:
         f.write(str(study.best_params))
-    
-    print("Saved best_hyperparams.txt")
 
 if __name__ == "__main__":
     # Test block (hvis man kører tune.py alene, skal man bruge dummy data eller loade selv)
