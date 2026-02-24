@@ -10,6 +10,7 @@ import trade
 import tune 
 import shutil
 import sys
+import concurrent.futures
 
 # --- HARDCORE SIKKERHED MOD TMP FEJL ---
 # Tjek om vi kører på HPC (hvis TMPDIR er sat)
@@ -155,26 +156,50 @@ def run_pipeline():
     # Opret mappe til ensemble modeller hvis den ikke findes
     os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
     
-    for i in range(n_models):
-        seed = 42 + i # Forskellige seeds: 42, 43, 44...
-        print(f"\n>>> Training Model {i+1}/{n_models} (Seed: {seed}) <<<")
-        
+# 1. Denne funktion køres isoleret af hver sin CPU-kerne
+    def train_and_save_model(i, seed, df_t, df_v, prices_t, prices_v):
+        print(f"--> Starter Model {i+1}/{n_models} (Seed: {seed}) på sin egen proces...")
         model = trade.train_agent(
-            train_df=train_final, 
-            val_df=val_final, 
-            raw_prices_train=prices_train_aligned,
-            raw_prices_val=prices_val_aligned,
-            seed=seed # Sender seed videre til trade.py
+            train_df=df_t, 
+            val_df=df_v, 
+            raw_prices_train=prices_t,
+            raw_prices_val=prices_v,
+            seed=seed
         )
-        
-        # Gem den individuelle model
         save_path = os.path.join(MODEL_SAVE_PATH, f"model_seed_{seed}.zip")
         model.save(save_path)
-        ensemble_models.append(model)
-        print(f"Model {i+1} saved to {save_path}")
+        print(f"<-- Model {i+1} (Seed: {seed}) er FÆRDIG og gemt på disken!")
+        return save_path
+
+    # 2. Tving Python til at bruge 'spawn' (Gør det skudsikkert mod CUDA/GPU crashes)
+    mp_context = multiprocessing.get_context('spawn')
+
+    # 3. Kør alle 7 modeller på samme tid
+    with concurrent.futures.ProcessPoolExecutor(max_workers=n_models, mp_context=mp_context) as executor:
+        futures = []
+        for i in range(n_models):
+            seed = 42 + i
+            # Vi sender dataene direkte ind i funktionen
+            futures.append(executor.submit(train_and_save_model, i, seed, train_final, val_final, prices_train_aligned, prices_val_aligned))
+
+        # Vent på at alle 7 processer er helt færdige
+        for future in concurrent.futures.as_completed(futures):
+            future.result() # Dette sikrer, at hvis én af modellerne fejler, får vi fejlen at se
+
+    print("\nAlle 7 modeller er færdigtrænet! Indlæser dem nu til backtest...")
+
+    # 4. Indlæs de gemte modeller tilbage i hukommelsen
+    # SB3 kræver et dummy environment for at indlæse en model korrekt
+    dummy_env = DummyVecEnv([lambda: trading_env.TradingEnv(val_final, prices_val_aligned)])
+
+    for i in range(n_models):
+        seed = 42 + i
+        save_path = os.path.join(MODEL_SAVE_PATH, f"model_seed_{seed}.zip")
+        loaded_model = RecurrentPPO.load(save_path, env=dummy_env)
+        ensemble_models.append(loaded_model)
 
     # Opret Ensemble Objektet
-    ensemble_agent = EnsembleModel(ensemble_models)
+    ensemble_agent = EnsembleModel(ensemble_models))
 
     # --- TRIN 6: BACKTEST ---
     print("\n--- 6. BACKTESTING ENSEMBLE ---")
