@@ -199,7 +199,7 @@ def run_pipeline():
         ensemble_models.append(loaded_model)
 
     # Opret Ensemble Objektet
-    ensemble_agent = EnsembleModel(ensemble_models))
+    ensemble_agent = EnsembleModel(ensemble_models)
 
     # --- TRIN 6: BACKTEST ---
     print("\n--- 6. BACKTESTING ENSEMBLE ---")
