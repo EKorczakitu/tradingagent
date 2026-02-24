@@ -13,6 +13,10 @@ import sys
 import concurrent.futures
 import multiprocessing
 
+# --- MANGLENDE IMPORTS TIL AT LOADE MODELLERNE IGEN ---
+from stable_baselines3.common.vec_env import DummyVecEnv
+from sb3_contrib import RecurrentPPO
+
 # --- HARDCORE SIKKERHED MOD TMP FEJL ---
 # Tjek om vi kører på HPC (hvis TMPDIR er sat)
 if "TMPDIR" in os.environ:
@@ -28,16 +32,35 @@ if "TMPDIR" in os.environ:
         print(f"FORCED SWITCH to local disk: {local_tmp}")
 
 print(f"Running with TMPDIR: {os.environ.get('TMPDIR', 'Not Set')}")
+
 # Settings
 MODEL_SAVE_PATH = "models/ppo_ensemble" # Mappe til at gemme alle modeller
 TEST_START_DATE = "2025-01-01"
 VAL_START_DATE  = "2024-01-01"
 
+
+# --- GLOBAL TRAINING FUNCTION FOR MULTIPROCESSING ---
+# Denne SKAL ligge herude (helt til venstre) for at undgå Pickle-fejl!
+def train_and_save_model(i, seed, df_t, df_v, prices_t, prices_v, model_save_path):
+    print(f"--> Starter Model {i+1} (Seed: {seed}) på sin egen proces...")
+    model = trade.train_agent(
+        train_df=df_t, 
+        val_df=df_v, 
+        raw_prices_train=prices_t,
+        raw_prices_val=prices_v,
+        seed=seed
+    )
+    save_path = os.path.join(model_save_path, f"model_seed_{seed}.zip")
+    model.save(save_path)
+    print(f"<-- Model {i+1} (Seed: {seed}) er FÆRDIG og gemt på disken!")
+    return save_path
+
+
 # --- ENSEMBLE CLASS ---
 class EnsembleModel:
     """
     En wrapper klasse der indeholder en liste af modeller.
-    Når man kalder .predict(), kører den alle modeller og tager gennemsnittet (Soft Voting).
+    Når man kalder .predict(), kører den alle modeller og tager gennemsnittet (Hard Voting).
     Håndterer også LSTM states for alle modellerne.
     """
     def __init__(self, models):
@@ -45,7 +68,7 @@ class EnsembleModel:
         print(f"Ensemble initialized with {len(models)} models.")
 
     def predict(self, obs, state=None, episode_start=None, deterministic=True):
-        from scipy import stats # Import this at the top of main.py
+        from scipy import stats 
         
         if state is None:
             state = [None] * len(self.models)
@@ -61,27 +84,10 @@ class EnsembleModel:
             new_states.append(next_state)
             
         # HARD VOTING: Use the mode (most frequent action) across models
-        # all_actions shape is (num_models, num_envs). We find mode along axis 0.
         mode_result = stats.mode(all_actions, axis=0, keepdims=False)
         final_action = mode_result.mode
         
         return final_action, new_states
-
-    # 1. Denne funktion køres isoleret af hver sin CPU-kerne
-    def train_and_save_model(i, seed, df_t, df_v, prices_t, prices_v):
-        print(f"--> Starter Model {i+1}/{n_models} (Seed: {seed}) på sin egen proces...")
-        model = trade.train_agent(
-            train_df=df_t, 
-            val_df=df_v, 
-            raw_prices_train=prices_t,
-            raw_prices_val=prices_v,
-            seed=seed
-        )
-        save_path = os.path.join(MODEL_SAVE_PATH, f"model_seed_{seed}.zip")
-        model.save(save_path)
-        print(f"<-- Model {i+1} (Seed: {seed}) er FÆRDIG og gemt på disken!")
-        return save_path
-
 
     def save(self, path):
         # Vi gemmer ikke selve ensemble objektet, men vi antager at modellerne er gemt individuelt
