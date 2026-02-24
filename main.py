@@ -11,6 +11,7 @@ import tune
 import shutil
 import sys
 import concurrent.futures
+import multiprocessing
 
 # --- HARDCORE SIKKERHED MOD TMP FEJL ---
 # Tjek om vi kører på HPC (hvis TMPDIR er sat)
