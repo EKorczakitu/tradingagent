@@ -78,14 +78,14 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
             val_env, 
             best_model_save_path=None,
             log_path=None, 
-            eval_freq=10000,
+            eval_freq=25000,
             n_eval_episodes=1,
             deterministic=True, 
             render=False
         )
         
         try:
-            model.learn(total_timesteps=100000, callback=eval_callback) # Hurtig test
+            model.learn(total_timesteps=2_000_000, callback=eval_callback) # Hurtig test
         except Exception as e:
             print(f"Trial failed: {e}")
             return -1000 
