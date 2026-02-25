@@ -122,7 +122,7 @@ def train_agent(train_df, val_df, raw_prices_train, raw_prices_val, seed=None):
 
     try:
         # Juster timesteps efter behov. 5M er standard, men til ensemble kan man evt. køre lidt mindre pr. model
-        model.learn(total_timesteps=1_000_000, callback=eval_callback, progress_bar=True)
+        model.learn(total_timesteps=7_500_000, callback=eval_callback, progress_bar=True)
     except KeyboardInterrupt:
         pass
     
