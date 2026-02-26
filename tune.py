@@ -95,6 +95,14 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
         # --- 5. Evaluate Performance ---
         mean_reward, _ = evaluate_policy(model, val_env, n_eval_episodes=1)
         trial.set_user_attr("net_arch", net_arch_type)
+
+        # --- NYT: TVING GPU TIL AT RYDDE OP ---
+        del model
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
         return mean_reward
 
     print("--- Starting Optuna Study ---")
