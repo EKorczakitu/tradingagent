@@ -78,7 +78,7 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
             val_env, 
             best_model_save_path=None,
             log_path=None, 
-            eval_freq=25000,
+            eval_freq=50000,
             n_eval_episodes=1,
             deterministic=True, 
             render=False
