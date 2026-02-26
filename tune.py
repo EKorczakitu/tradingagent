@@ -85,7 +85,7 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
         )
         
         try:
-            model.learn(total_timesteps=2_000_000, callback=eval_callback) # Hurtig test
+            model.learn(total_timesteps=750_000, callback=eval_callback) # Hurtig test
         except Exception as e:
             print(f"Trial failed: {e}")
             return -1000 
@@ -101,7 +101,7 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
     study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
     
     # KUN 2 TRIALS TIL TEST
-    study.optimize(objective, n_trials=25, show_progress_bar=True)
+    study.optimize(objective, n_trials=20, show_progress_bar=True)
     
     print("\n--- Tuning Complete ---")
     print("Best Params:", study.best_params)
