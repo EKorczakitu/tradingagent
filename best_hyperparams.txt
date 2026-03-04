@@ -1,1 +1,1 @@
-{'learning_rate': 7.748086778088737e-05, 'gamma': 0.9635231717391001, 'gae_lambda': 0.9102456241606184, 'ent_coef': 1.81695608350505e-05, 'max_grad_norm': 0.48847188418487986, 'net_arch': 'large', 'n_steps': 4096, 'batch_size': 2048, 'lstm_hidden': 1024}
+{'learning_rate': 0.0001405920041063218, 'gamma': 0.974528540864676, 'gae_lambda': 0.9348216911191569, 'ent_coef': 2.14057489492627e-06, 'max_grad_norm': 0.6529989038672888, 'net_arch': 'medium', 'n_steps': 2048, 'batch_size': 2048, 'lstm_hidden': 256}
