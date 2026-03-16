@@ -10,7 +10,7 @@ class TradingEnv(gym.Env):
     - Dynamic Slippage (Volatilitets-afhængig)
     - Sortino-baseret Reward (Downside risk focus)
     """
-    def __init__(self, df_features, df_raw, spread=0.0002):
+    def __init__(self, df_features, df_raw, spread=0.001):
         super(TradingEnv, self).__init__()
         
         self.features_data = df_features.values.astype(np.float32)
