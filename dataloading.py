@@ -18,6 +18,8 @@ def load_data(filename):
         df.set_index('Local time', inplace=True)
         df.sort_index(inplace=True)
         df.index.name = 'Date'
+
+        df = df[df['volume'] > 0].copy()
         
         numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
         for col in numeric_cols:
