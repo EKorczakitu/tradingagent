@@ -16,6 +16,8 @@ class TradingEnv(gym.Env):
         self.features_data = df_features.values.astype(np.float32)
         self.close_prices = df_raw['Close'].values.astype(np.float32)
         self.open_prices = df_raw['Open'].values.astype(np.float32)
+
+        self.timestamps = pd.to_datetime(df_raw.index)
         
         # Calculate realistically executable returns: Enter at Open[t+1], Exit at Close[t+1]
         self.market_log_returns = np.zeros(len(self.close_prices), dtype=np.float32)
@@ -64,8 +66,15 @@ class TradingEnv(gym.Env):
         if action == 1: target_position = 1
         elif action == 2: target_position = -1
         
-        # --- DYNAMIC SLIPPAGE ---
-        # Hvis volatiliteten er høj, stiger spreadet (simulerer dårlig execution)
+        # Aflæs klokkeslættet for det nuværende step
+        current_hour = self.timestamps[self.current_step].hour
+        
+        # Den danske børs lukker kl. 17.00. Vores sidste time-candle starter kl. 16.00.
+        # Hvis klokken er 16 (eller mere), nægter vi agenten at holde en position over natten.
+        if current_hour >= 16:
+            target_position = 0  # Tving agenten til at gå "Flat" (sælg alt)
+
+        
         # Formel: Base Spread + (Vol * 0.5)
         exec_cost = self.base_spread + (current_vol * 0.5)
         
