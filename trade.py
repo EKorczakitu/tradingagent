@@ -42,10 +42,9 @@ def get_optimal_params():
 def get_net_arch(arch_type):
     if arch_type == 'medium': return dict(pi=[128, 128], vf=[128, 128])
     elif arch_type == 'large': return dict(pi=[256, 256], vf=[256, 256])
-    elif arch_type == 'xlarge': return dict(pi=[512, 512, 512], vf=[512,512,512]) # Tilføjet xlarge support
     return dict(pi=[64, 64], vf=[64, 64])
 
-def make_env(rank, df_features, df_raw, spread=0.0002, seed=0):
+def make_env(rank, df_features, df_raw, spread=0.001, seed=0):
     """Factory function for multiprocessing med Seed"""
     def _init():
         env = TradingEnv(df_features, df_raw, spread=spread)
@@ -121,8 +120,7 @@ def train_agent(train_df, val_df, raw_prices_train, raw_prices_val, seed=None):
     )
 
     try:
-        # Juster timesteps efter behov. 5M er standard, men til ensemble kan man evt. køre lidt mindre pr. model
-        model.learn(total_timesteps=6_000_000, callback=eval_callback, progress_bar=True)
+        model.learn(total_timesteps=1_000_000, callback=eval_callback, progress_bar=True)
     except KeyboardInterrupt:
         pass
     
