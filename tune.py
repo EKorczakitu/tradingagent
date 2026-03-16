@@ -29,8 +29,7 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
         gae_lambda = trial.suggest_float("gae_lambda", 0.90, 1.0)
         ent_coef = trial.suggest_float("ent_coef", 1e-6, 0.01, log=True)
         max_grad_norm = trial.suggest_float("max_grad_norm", 0.3, 1.0)
-        
-        net_arch_type = trial.suggest_categorical("net_arch", ["small", "medium", "large", "xlarge"])
+        net_arch_type = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
         
         if net_arch_type == "small":
             net_arch = dict(pi=[64, 64], vf=[64, 64])
@@ -38,8 +37,6 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
             net_arch = dict(pi=[128, 128], vf=[128, 128])
         elif net_arch_type == "large":
             net_arch = dict(pi=[256, 256], vf=[256, 256])
-        elif net_arch_type == "xlarge":
-            net_arch = dict(pi=[512, 512, 512], vf=[512, 512, 512])
 
         n_steps = trial.suggest_categorical("n_steps", [2048, 4096, 8192])
         batch_size = trial.suggest_categorical("batch_size", [512, 1024, 2048])
@@ -85,7 +82,7 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
         )
         
         try:
-            model.learn(total_timesteps=750_000, callback=eval_callback) # Hurtig test
+            model.learn(total_timesteps=500_000, callback=eval_callback) # Hurtig test
         except Exception as e:
             print(f"Trial failed: {e}")
             return -1000 
