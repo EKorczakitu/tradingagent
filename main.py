@@ -1,6 +1,11 @@
 import pandas as pd
 import numpy as np
 import os
+os.environ["OMP_NUM_THREADS"] = "6"
+os.environ["MKL_NUM_THREADS"] = "6"
+os.environ["OPENBLAS_NUM_THREADS"] = "6"
+
+
 import dataloading
 import features
 import feature_selection
@@ -42,7 +47,11 @@ VAL_START_DATE  = "2024-01-01"
 # --- GLOBAL TRAINING FUNCTION FOR MULTIPROCESSING ---
 # Denne SKAL ligge herude (helt til venstre) for at undgå Pickle-fejl!
 def train_and_save_model(i, seed, df_t, df_v, prices_t, prices_v, model_save_path):
-    print(f"--> Starter Model {i+1} (Seed: {seed}) på sin egen proces...")
+    import torch
+    # Tving PyTorch til at bruge præcis 6 CPU-kerner til denne model
+    torch.set_num_threads(6) 
+    
+    print(f"--> Starter Model {i+1} (Seed: {seed}) på sin egen proces med 6 tråde...")
     model = trade.train_agent(
         train_df=df_t, 
         val_df=df_v, 
@@ -52,7 +61,7 @@ def train_and_save_model(i, seed, df_t, df_v, prices_t, prices_v, model_save_pat
     )
     save_path = os.path.join(model_save_path, f"model_seed_{seed}.zip")
     model.save(save_path)
-    print(f"<-- Model {i+1} (Seed: {seed}) er FÆRDIG og gemt på disken!")
+    print(f"<-- Model {i+1} (Seed: {seed}) er FÆRDIG og gemt!")
     return save_path
 
 
@@ -174,7 +183,7 @@ def run_pipeline():
     print("\n--- 5. TRAINING ENSEMBLE (9 RANDOM SEEDS) ---")
     
     ensemble_models = []
-    n_models = 7
+    n_models = 5
     
     # Opret mappe til ensemble modeller hvis den ikke findes
     os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
