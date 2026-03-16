@@ -21,7 +21,7 @@ class TradingEnv(gym.Env):
         
         # Calculate realistically executable returns: Enter at Open[t+1], Exit at Close[t+1]
         self.market_log_returns = np.zeros(len(self.close_prices), dtype=np.float32)
-        self.market_log_returns[:-1] = np.log(self.close_prices[1:] / (self.open_prices[1:] + 1e-9))
+        self.market_log_returns[:-1] = np.log(self.close_prices[1:] / (self.close_prices[:-1] + 1e-9))
         self.prices_data = self.close_prices
         # Pre-calculate Volatility for Dynamic Slippage
         # (Vi bruger rullende std på raw returns som proxy for markedsuro)
@@ -94,7 +94,7 @@ class TradingEnv(gym.Env):
         # This naturally forces the PPO agent to become risk-averse without mathematically breaking the RL objective.
         if net_return < 0:
             # Penalize losses heavily (e.g., 2.5x multiplier on negative returns)
-            reward = net_return * 2.5 * 100.0
+            reward = net_return * 1.1 * 100.0
         else:
             # Normal reward for gains
             reward = net_return * 100.0
