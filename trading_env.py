@@ -19,15 +19,18 @@ class TradingEnv(gym.Env):
 
         self.timestamps = pd.to_datetime(df_raw.index)
         
+        # --- LØSNING 2: Execution Mismatch ---
         # Calculate realistically executable returns: Enter at Open[t+1], Exit at Close[t+1]
         self.market_log_returns = np.zeros(len(self.close_prices), dtype=np.float32)
-        self.market_log_returns[:-1] = np.log(self.close_prices[1:] / (self.close_prices[:-1] + 1e-9))
+        # Ændret nævner fra close_prices[:-1] til open_prices[1:]
+        self.market_log_returns[:-1] = np.log(self.close_prices[1:] / (self.open_prices[1:] + 1e-9))
         self.prices_data = self.close_prices
+        
+        # --- LØSNING 1: Future Data Leak i Volatilitet ---
         # Pre-calculate Volatility for Dynamic Slippage
-        # (Vi bruger rullende std på raw returns som proxy for markedsuro)
-        raw_ret = np.diff(self.prices_data) / (self.prices_data[:-1] + 1e-9)
-        self.market_vol = np.zeros_like(self.prices_data)
-        self.market_vol[:-1] = pd.Series(raw_ret).rolling(20).std().fillna(0.0001).values
+        # Brug pct_change() i stedet for np.diff() for at sikre, at vi kun ser bagud i tid.
+        raw_ret = pd.Series(self.prices_data).pct_change().fillna(0).values
+        self.market_vol = pd.Series(raw_ret).rolling(20).std().fillna(0.0001).values
 
         self.max_steps = len(self.prices_data) - 1
         self.base_spread = spread
@@ -69,19 +72,33 @@ class TradingEnv(gym.Env):
         # Aflæs klokkeslættet for det nuværende step
         current_hour = self.timestamps[self.current_step].hour
         
-        # Den danske børs lukker kl. 17.00. Vores sidste time-candle starter kl. 16.00.
-        # Hvis klokken er 16 (eller mere), nægter vi agenten at holde en position over natten.
-        if current_hour >= 16:
-            target_position = 0  # Tving agenten til at gå "Flat" (sælg alt)
-
-        
-        # Formel: Base Spread + (Vol * 0.5)
+        # Formel for handelsomkostninger
         exec_cost = self.base_spread + (current_vol * 0.5)
         
+        # Omkostninger for at indtage/justere positionen for denne time
         turnover = abs(target_position - prev_position)
         trade_cost = turnover * exec_cost
         
+        # Bruttoafkast for den aktuelle time
         gross_return = target_position * market_log_ret
+        
+        # --- LØSNING 3: Intraday Exit Logik ---
+        # Den danske børs lukker kl. 17.00. Vi tillader agenten at tjene penge på kl. 16-17 candle'en,
+        # men i slutningen af timen tvinger vi den til at lukke positionen (og betale spread),
+        # så den ikke holder positionen over natten.
+        if current_hour >= 16:
+            # Beregn omkostningen for at tvinge positionen tilbage til 0 ved lukketid
+            forced_exit_turnover = abs(0 - target_position)
+            forced_exit_cost = forced_exit_turnover * exec_cost
+            trade_cost += forced_exit_cost
+            
+            # Næste start-position (næste dags morgen) bliver 0
+            self.position = 0
+        else:
+            # Gemmer den nuværende position til næste time
+            self.position = target_position
+
+        # Nettoafkast
         net_return = gross_return - trade_cost
         
         # Update Balance
@@ -89,20 +106,14 @@ class TradingEnv(gym.Env):
         new_balance = current_balance * np.exp(net_return)
         self.balance_history.append(new_balance)
 
-        # --- ASYMMETRIC STEP REWARD (FIX 3) ---
-        # Instead of a rolling Sortino ratio, we penalize losses more heavily than gains.
-        # This naturally forces the PPO agent to become risk-averse without mathematically breaking the RL objective.
+        # --- ASYMMETRIC STEP REWARD ---
         if net_return < 0:
-            # Penalize losses heavily (e.g., 2.5x multiplier on negative returns)
             reward = net_return * 1.1 * 100.0
         else:
-            # Normal reward for gains
             reward = net_return * 100.0
             
-        # Multipliceret med 100.0 ovenfor for at skalere til Neural Network venlige tal
         reward = np.clip(reward, -10.0, 10.0)
         
-        self.position = target_position
         self.current_step += 1
         
         terminated = self.current_step >= self.max_steps

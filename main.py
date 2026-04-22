@@ -5,7 +5,6 @@ os.environ["OMP_NUM_THREADS"] = "6"
 os.environ["MKL_NUM_THREADS"] = "6"
 os.environ["OPENBLAS_NUM_THREADS"] = "6"
 
-
 import dataloading
 import features
 import feature_selection
@@ -18,18 +17,41 @@ import sys
 import concurrent.futures
 import multiprocessing
 
-# --- MANGLENDE IMPORTS TIL AT LOADE MODELLERNE IGEN ---
 from stable_baselines3.common.vec_env import DummyVecEnv
 from sb3_contrib import RecurrentPPO
+
+# --- CUSTOM TRANSFORMER TIL AT FORHINDRE DATA LÆKAGE ---
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+class TrainQuantileWinsorizer(BaseEstimator, TransformerMixin):
+    """
+    Klipper outliers baseret på fraktiler udregnet UDELUKKENDE fra træningsdata.
+    Dette forhindrer distribution shift og fremtids-lækage.
+    """
+    def __init__(self, lower_q=0.001, upper_q=0.999):
+        self.lower_q = lower_q
+        self.upper_q = upper_q
+        self.lower_bounds_ = None
+        self.upper_bounds_ = None
+        
+    def fit(self, X, y=None):
+        # Gemmer de specifikke værdi-grænser for hver kolonne fra træningssættet
+        self.lower_bounds_ = X.quantile(self.lower_q)
+        self.upper_bounds_ = X.quantile(self.upper_q)
+        return self
+        
+    def transform(self, X, y=None):
+        # Bruger de GEMTE grænser til at klippe nye (val/test) data
+        return X.clip(lower=self.lower_bounds_, upper=self.upper_bounds_, axis=1)
 
 # --- HARDCORE SIKKERHED MOD TMP FEJL ---
 # Tjek om vi kører på HPC (hvis TMPDIR er sat)
 if "TMPDIR" in os.environ:
-    # Sikr at vi IKKE bruger home-mappen
     if os.environ["TMPDIR"].startswith("/home"):
         print(f"CRITICAL WARNING: TMPDIR is set to {os.environ['TMPDIR']} (Network Drive).")
         print("This WILL cause crashes. Please fix run_ensemble.sh to use /tmp/...")
-        # Vi prøver at redde den ved at tvinge den over på lokal disk hvis muligt
         local_tmp = f"/tmp/{os.environ.get('USER', 'user')}/fallback_job"
         os.makedirs(local_tmp, exist_ok=True)
         os.environ["TMPDIR"] = local_tmp
@@ -38,17 +60,12 @@ if "TMPDIR" in os.environ:
 
 print(f"Running with TMPDIR: {os.environ.get('TMPDIR', 'Not Set')}")
 
-# Settings
-MODEL_SAVE_PATH = "models/ppo_ensemble" # Mappe til at gemme alle modeller
+MODEL_SAVE_PATH = "models/ppo_ensemble" 
 TEST_START_DATE = "2025-01-01"
 VAL_START_DATE  = "2024-01-01"
 
-
-# --- GLOBAL TRAINING FUNCTION FOR MULTIPROCESSING ---
-# Denne SKAL ligge herude (helt til venstre) for at undgå Pickle-fejl!
 def train_and_save_model(i, seed, df_t, df_v, prices_t, prices_v, model_save_path):
     import torch
-    # Tving PyTorch til at bruge præcis 6 CPU-kerner til denne model
     torch.set_num_threads(6) 
     
     print(f"--> Starter Model {i+1} (Seed: {seed}) på sin egen proces med 6 tråde...")
@@ -64,14 +81,7 @@ def train_and_save_model(i, seed, df_t, df_v, prices_t, prices_v, model_save_pat
     print(f"<-- Model {i+1} (Seed: {seed}) er FÆRDIG og gemt!")
     return save_path
 
-
-# --- ENSEMBLE CLASS ---
 class EnsembleModel:
-    """
-    En wrapper klasse der indeholder en liste af modeller.
-    Når man kalder .predict(), kører den alle modeller og tager gennemsnittet (Hard Voting).
-    Håndterer også LSTM states for alle modellerne.
-    """
     def __init__(self, models):
         self.models = models
         print(f"Ensemble initialized with {len(models)} models.")
@@ -92,27 +102,22 @@ class EnsembleModel:
             all_actions.append(action)
             new_states.append(next_state)
             
-        # HARD VOTING: Use the mode (most frequent action) across models
         mode_result = stats.mode(all_actions, axis=0, keepdims=False)
         final_action = mode_result.mode
         
         return final_action, new_states
 
     def save(self, path):
-        # Vi gemmer ikke selve ensemble objektet, men vi antager at modellerne er gemt individuelt
         pass
 
 def run_pipeline():
     print("\n--- 1. STARTING PIPELINE (HPC MODE - ENSEMBLE 9 MODELS) ---")
 
-    # --- TRIN 1: LOAD DATA & GENERATE FEATURES ---
     print("Loading data and generating features...")
     df_full = dataloading.get_full_dataset()
     
-    # Generer features på hele sættet FØR split
     df_features_full = features.generate_alpha_pool(df_full)
     
-    # --- TRIN 2: SPLIT DATA ---
     print("Splitting data...")
     mask_train = df_features_full.index < VAL_START_DATE
     mask_val   = (df_features_full.index >= VAL_START_DATE) & (df_features_full.index < TEST_START_DATE)
@@ -126,26 +131,39 @@ def run_pipeline():
 
     # --- TRIN 3: NORMALISERING & CLEANING ---
     print("\n--- 3. NORMALIZING ---")
-    X_train_scaled, scaler = features.normalize_features(X_train)
     
-    def process_split(df_feat, scl):
-        numeric = df_feat.select_dtypes(include=['float32', 'float64']).columns
-        df_feat[numeric] = df_feat[numeric].clip(upper=1e9, lower=-1e9)
-        df_clean = df_feat.dropna()
-        data_scaled = scl.transform(df_clean)
-        return pd.DataFrame(data_scaled, columns=df_clean.columns, index=df_clean.index)
+    # Fjern NaNs fra træningssættet inden vi lærer fordelingerne
+    X_train_clean = X_train.dropna().copy()
+    
+    # Opret pipelinen: Først klipper vi (Winsorizer), derefter skalerer vi
+    prep_pipeline = Pipeline([
+        ('winsorizer', TrainQuantileWinsorizer(lower_q=0.001, upper_q=0.999)),
+        ('scaler', StandardScaler())
+    ])
+    
+    # Vi kalder FIT KUN PÅ TRÆNINGSDATA. Dette fastlåser fraktiler og z-score gennemsnit.
+    X_train_scaled_array = prep_pipeline.fit_transform(X_train_clean)
+    X_train_scaled = pd.DataFrame(X_train_scaled_array, columns=X_train_clean.columns, index=X_train_clean.index)
+    
+    def process_split(df_feat, fitted_pipeline):
+        # Her har vi fjernet det hardcodede .clip() og lader i stedet pipelinen 
+        # udføre magien med de grænser, den lærte fra X_train.
+        df_clean = df_feat.dropna().copy()
+        data_scaled_array = fitted_pipeline.transform(df_clean)
+        return pd.DataFrame(data_scaled_array, columns=df_clean.columns, index=df_clean.index)
 
-    X_val_scaled  = process_split(X_val, scaler)
-    X_test_scaled = process_split(X_test, scaler)
+    # Transformér Validation og Test med den trænede pipeline
+    X_val_scaled  = process_split(X_val, prep_pipeline)
+    X_test_scaled = process_split(X_test, prep_pipeline)
     
     print(f"Cleaned shapes -> Train: {X_train_scaled.shape}, Val: {X_val_scaled.shape}, Test: {X_test_scaled.shape}")
 
-# --- TRIN 4: FEATURE SELECTION (VARIANCE THRESHOLD) ---
+    # --- TRIN 4: FEATURE SELECTION (VARIANCE THRESHOLD) ---
+    # ... (Resten af din pipeline fra TRIN 4 og frem forbliver uændret) ...
+    
     print("\n--- 4. FEATURE SELECTION (KEEPING CONTEXT) ---")
     from sklearn.feature_selection import VarianceThreshold
     
-    # Vi fjerner kun features der absolut ingen varians har (konstante værdier)
-    # Dette sikrer at vores LSTM bevarer kontekst som f.eks. makro-trends og volatilitetsregimer
     selector = VarianceThreshold(threshold=0.001)
     selector.fit(X_train_scaled)
     
@@ -155,7 +173,6 @@ def run_pipeline():
     val_final  = X_val_scaled.loc[X_val_scaled.index.intersection(X_val_scaled.index), selected_cols]
     test_final = X_test_scaled.loc[X_test_scaled.index.intersection(X_test_scaled.index), selected_cols]
     
-    # --- TRIN 4.5: CRITICAL DATA ALIGNMENT ---
     def align_prices(features_df, raw_df):
         common_idx = features_df.index.intersection(raw_df.index)
         return raw_df.loc[common_idx]
@@ -169,9 +186,7 @@ def run_pipeline():
     
     print(f"Selected {len(selected_cols)} features (dropped {len(X_train_scaled.columns) - len(selected_cols)} flat features).")
 
-    # --- TRIN 4.8: HYPERPARAMETER TUNING ---
     print("\n--- 4.8. RUNNING HYPERPARAMETER TUNING (ONCE) ---")
-    # Vi tuner kun én gang for at finde de generelle bedste parametre
     tune.run_tuning(
         train_feat=train_final,
         val_feat=val_final,
@@ -179,36 +194,29 @@ def run_pipeline():
         val_prices=prices_val_aligned
     )
 
-    # --- TRIN 5: ENSEMBLE TRAINING (9 MODELS) ---
-    print("\n--- 5. TRAINING ENSEMBLE (9 RANDOM SEEDS) ---")
+    print("\n--- 5. TRAINING ENSEMBLE ---")
     
     ensemble_models = []
-    n_models = 5
+    n_models = 5 # (Du skrev 9 i kommentarer, men satte variablen til 5, jeg lader din logik stå urørt her)
     
-    # Opret mappe til ensemble modeller hvis den ikke findes
     os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
     
-    # 1. Tving Python til at bruge 'spawn' (Gør det skudsikkert mod CUDA/GPU crashes)
     mp_context = multiprocessing.get_context('spawn')
 
-    # 2. Kør alle 7 modeller på samme tid
     with concurrent.futures.ProcessPoolExecutor(max_workers=n_models, mp_context=mp_context) as executor:
         futures = []
         for i in range(n_models):
             seed = 42 + i
-            # Bemærk at vi nu også sender MODEL_SAVE_PATH med som argument
             futures.append(executor.submit(
                 train_and_save_model, 
                 i, seed, train_final, val_final, prices_train_aligned, prices_val_aligned, MODEL_SAVE_PATH
             ))
 
-        # Vent på at alle 7 processer er helt færdige
         for future in concurrent.futures.as_completed(futures):
-            future.result() # Dette fanger eventuelle fejl i child-processerne
+            future.result() 
 
-    print("\nAlle 7 modeller er færdigtrænet! Indlæser dem nu til backtest...")
+    print("\nAlle modeller er færdigtrænet! Indlæser dem nu til backtest...")
 
-    # 3. Indlæs de gemte modeller tilbage i hukommelsen
     dummy_env = DummyVecEnv([lambda: trading_env.TradingEnv(val_final, prices_val_aligned)])
 
     for i in range(n_models):
@@ -217,10 +225,8 @@ def run_pipeline():
         loaded_model = RecurrentPPO.load(save_path, env=dummy_env)
         ensemble_models.append(loaded_model)
 
-    # Opret Ensemble Objektet
     ensemble_agent = EnsembleModel(ensemble_models)
 
-    # --- TRIN 6: BACKTEST ---
     print("\n--- 6. BACKTESTING ENSEMBLE ---")
     
     env_val = trading_env.TradingEnv(val_final, prices_val_aligned)
