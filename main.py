@@ -83,8 +83,8 @@ def train_and_save_model(i, seed, df_t, df_v, prices_t, prices_v, model_save_pat
 
 class EnsembleModel:
     """
-    Attention-baseret Soft Ensemble (Meta-Learner).
-    Bruger rullende Sharpe Ratio og Softmax til at vægte forudsigelser fra modellerne.
+    Sharpe-vægtet Continuous Ensemble (Meta-Learner).
+    Tager et vægtet gennemsnit af modellernes allokerings-outputs baseret på deres rullende Sharpe Ratio.
     """
     def __init__(self, models, window_size=50):
         self.models = models
@@ -93,33 +93,9 @@ class EnsembleModel:
         
         # Buffer til at gemme hypotetiske afkast for hver model
         self.model_returns = [[] for _ in range(self.n_models)]
-        self.last_target_positions = [0] * self.n_models
+        self.last_target_positions = [0.0] * self.n_models
         
-        print(f"Soft Voting Ensemble initialized med {self.n_models} modeller (Rullende vindue: {window_size} steps).")
-
-    def _get_action_probs(self, model, obs, state, episode_start):
-        """
-        Trækker aktions-sandsynlighederne (logits) ud af en RecurrentPPO policy.
-        """
-        import torch
-        with torch.no_grad(): # Vi træner ikke, så vi sparer hukommelse
-            # Konverter numpy observation til PyTorch tensor
-            obs_tensor, _ = model.policy.obs_to_tensor(obs)
-            
-            # Håndter LSTM episode starts
-            starts_tensor = None
-            if episode_start is not None:
-                starts_tensor = torch.tensor(episode_start, dtype=torch.float32, device=model.device)
-            
-            # Kør data gennem modellens netværk
-            features = model.policy.extract_features(obs_tensor)
-            latent_pi, _, _ = model.policy.mlp_extractor(features, state, starts_tensor)
-            
-            # Få selve fordelingen (sandsynligheder for Hold, Long, Short)
-            distribution = model.policy.action_net.get_action_dist_from_latent(latent_pi)
-            probs = distribution.distribution.probs.cpu().numpy()[0]
-            
-        return probs
+        print(f"Continuous Soft Voting Ensemble initialized med {self.n_models} modeller (Vindue: {window_size}).")
 
     def predict(self, obs, state=None, episode_start=None, deterministic=True):
         import numpy as np
@@ -129,12 +105,10 @@ class EnsembleModel:
             state = [None] * self.n_models
         
         new_states = []
-        all_probs = []
         
         # 1. Udregn dynamiske vægte baseret på Rullende Sharpe Ratio
         weights = np.ones(self.n_models) / self.n_models  # Default: ligelig fordeling
         
-        # Vi skal bruge lidt data, før vi kan straffe/belønne modeller
         if len(self.model_returns[0]) > 10: 
             sharpes = []
             for i in range(self.n_models):
@@ -142,42 +116,49 @@ class EnsembleModel:
                 mean_ret = np.mean(rets)
                 std_ret = np.std(rets) + 1e-9 # Undgå division med nul
                 
-                # Udregn Sharpe
                 sharpe = mean_ret / std_ret
                 sharpes.append(sharpe)
             
-            # Softmax konverterer Sharpe Ratios til procentsatser (der summerer til 1.0)
-            # 'temperature' justerer hvor aggressivt vi straffer dårlige modeller (lavere temp = hårdere straf)
             temperature = 1.0 
             weights = softmax(np.array(sharpes) / temperature)
 
-        # 2. Indhent forudsigelser og fordelinger fra hver model
+        # 2. Indhent float-forudsigelser fra hver model og vægt dem
+        weighted_action = 0.0
+        
         for i, model in enumerate(self.models):
             model_state = state[i]
             
-            # Få den valgte handling og det nye LSTM state
+            # Action her er nu et numpy array, f.eks. [0.45]
             action, next_state = model.predict(obs, state=model_state, episode_start=episode_start, deterministic=deterministic)
             new_states.append(next_state)
             
-            # Hent de bagvedliggende sandsynligheder for denne beslutning
-            probs = self._get_action_probs(model, obs, model_state, episode_start)
-            all_probs.append(probs)
+            action_val = float(action[0])
             
-            # Gem modellens "ønskede position" så vi kan beregne dens PnL i næste step
-            target_pos = 0
-            if action == 1: target_pos = 1
-            elif action == 2: target_pos = -1
-            self.last_target_positions[i] = target_pos
+            # Gem modellens position til PnL track-record
+            self.last_target_positions[i] = action_val
+            
+            # Vægt allokeringen
+            weighted_action += weights[i] * action_val
 
-        # 3. SOFT VOTING: Gang hver models fordeling med dens Sharpe-vægt
-        weighted_probs = np.zeros(3)
-        for i in range(self.n_models):
-            weighted_probs += weights[i] * all_probs[i]
-            
-        # Den endelige handling er den, der har den højeste samlede sandsynlighed
-        final_action = int(np.argmax(weighted_probs))
+        # 3. Formatér endelig handling til det format miljøet forventer (Numpy array, shape=(1,))
+        final_action = np.array([np.clip(weighted_action, -1.0, 1.0)], dtype=np.float32)
         
         return final_action, new_states
+
+    def update_performance(self, market_return):
+        """
+        Beregner hvad hver model VILLE have tjent med deres float-positioner.
+        """
+        for i in range(self.n_models):
+            # Float-allokering * market return
+            hypothetical_return = self.last_target_positions[i] * market_return
+            self.model_returns[i].append(hypothetical_return)
+            
+            if len(self.model_returns[i]) > self.window_size:
+                self.model_returns[i].pop(0)
+
+    def save(self, path):
+        pass
 
     def update_performance(self, market_return):
         """
@@ -279,26 +260,44 @@ def run_pipeline():
         val_prices=prices_val_aligned
     )
 
-    print("\n--- 5. TRAINING ENSEMBLE ---")
+    print("\n--- 5. TRAINING ENSEMBLE (WITH BLOCK BOOTSTRAPPING) ---")
     
     ensemble_models = []
     n_models = 5
     
     os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
-    
     mp_context = multiprocessing.get_context('spawn')
+
+    def apply_block_bootstrap(df_feat, df_prices, seed, drop_fraction=0.15):
+        """ Dropper en tilfældig sammenhængende tidsblok for at gennemtvinge dekorrelation. """
+        np.random.seed(seed)
+        n_rows = len(df_feat)
+        drop_size = int(n_rows * drop_fraction)
+        
+        # Undgå at droppe data helt i starten eller slutningen for stabilitet
+        start_idx = np.random.randint(int(n_rows * 0.1), int(n_rows * 0.9) - drop_size)
+        
+        # Behold alt uden for blokken
+        mask = np.ones(n_rows, dtype=bool)
+        mask[start_idx : start_idx + drop_size] = False
+        
+        return df_feat.iloc[mask].copy(), df_prices.iloc[mask].copy()
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=n_models, mp_context=mp_context) as executor:
         futures = []
         for i in range(n_models):
             seed = 42 + i
+            
+            # Sub-sample træningsdata per agent for at undgå Ensemble Collapse
+            train_feat_bagged, prices_train_bagged = apply_block_bootstrap(train_final, prices_train_aligned, seed)
+            
             futures.append(executor.submit(
                 train_and_save_model, 
-                i, seed, train_final, val_final, prices_train_aligned, prices_val_aligned, MODEL_SAVE_PATH
+                i, seed, train_feat_bagged, val_final, prices_train_bagged, prices_val_aligned, MODEL_SAVE_PATH
             ))
 
         for future in concurrent.futures.as_completed(futures):
-            future.result() 
+            future.result()  
 
     print("\nAlle modeller er færdigtrænet! Indlæser dem nu til backtest...")
 

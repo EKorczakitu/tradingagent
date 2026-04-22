@@ -15,7 +15,7 @@ from stable_baselines3.common.monitor import Monitor
 # --- Local Imports ---
 from trading_env import TradingEnv
 # Vi importerer din nye Custom Transformer fra trade.py
-from trade import TimeSeriesTransformerExtractor 
+from trade import AdvancedQuantTransformer
 
 def run_tuning(train_feat, val_feat, train_prices, val_prices):
     print("\n--- Starting Optuna Tuning (Transformer HPC Mode) ---")
@@ -55,7 +55,7 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices):
 
         # --- 3. Define Model (PPO med Transformer Extractor) ---
         policy_kwargs = dict(
-            features_extractor_class=TimeSeriesTransformerExtractor,
+            features_extractor_class=AdvancedQuantTransformer,
             features_extractor_kwargs=dict(
                 window_size=window_size,
                 features_dim=128,
