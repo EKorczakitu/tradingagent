@@ -282,7 +282,7 @@ def run_pipeline():
     print("\n--- 5. TRAINING ENSEMBLE ---")
     
     ensemble_models = []
-    n_models = 5 # (Du skrev 9 i kommentarer, men satte variablen til 5, jeg lader din logik stå urørt her)
+    n_models = 5
     
     os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
     
