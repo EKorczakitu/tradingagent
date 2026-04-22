@@ -14,8 +14,8 @@ def calculate_metrics(returns_series, risk_free_rate=0.0):
     # 1. Returns Metrics
     total_return = (1 + r).prod() - 1
     # Antag 1-times data: 252 handelsdage * 8 timer (eller 24 crypto)
-    # Juster 'periods_per_year' afhængigt af din data (Crypto=365*24=8760, Aktier=252*7=1764)
-    periods_per_year = 252 * 8  # Estimat for time-data på aktier
+    # Juster 'periods_per_year' afhængigt af din data (Crypto=365*24=8760, Aktier=252*8=2016)
+    periods_per_year = 252 * 8  
     
     avg_return = r.mean()
     cagr = (1 + total_return) ** (periods_per_year / len(r)) - 1 if len(r) > 0 else 0
@@ -66,25 +66,43 @@ def print_report(metrics, title="Backtest Resultater"):
 def run_backtest_engine(env, model, title="Test Set"):
     """
     Kører agenten igennem miljøet og samler statistik.
+    Understøtter nu RNN/LSTM states og dynamisk ensemble feedback.
     """
     obs, _ = env.reset()
     done = False
+    truncated = False
+    
+    # --- NYT: Setup til LSTM og Meta-Learner ---
+    lstm_states = None
+    episode_starts = np.array([True]) # Netværket skal vide at dette er første step
     
     returns_log = []
     actions_log = []
     portfolio_values = [env.balance_history[0]]
     
-    while not done:
-        action, _states = model.predict(obs, deterministic=True)
+    while not done and not truncated:
+        # --- NYT: Send LSTM states med og grib de nye ---
+        action, lstm_states = model.predict(
+            obs, 
+            state=lstm_states, 
+            episode_start=episode_starts, 
+            deterministic=True
+        )
+        
         obs, reward, done, truncated, info = env.step(action)
+        
+        # Opdater episode_starts til næste loop
+        episode_starts = np.array([done or truncated])
+        
+        # --- NYT: Giv feedback til Soft Voting Meta-Learner ---
+        if hasattr(model, 'update_performance'):
+            # Ensemblet bruger net_return til at vurdere om de enkelte modellers valg var gode
+            model.update_performance(info.get('net_return', 0))
         
         # Gem data
         returns_log.append(info.get('net_return', 0))
         actions_log.append(info.get('position', 0))
         portfolio_values.append(info.get('balance', 10000))
-        
-        if done or truncated:
-            break
             
     # Konverter til Series for nem beregning
     returns_series = pd.Series(returns_log)
@@ -95,14 +113,17 @@ def run_backtest_engine(env, model, title="Test Set"):
     
     # Plot Cumulative Returns
     plt.figure(figsize=(10, 6))
-    plt.plot(portfolio_values, label='Portfolio Value')
+    plt.plot(portfolio_values, label='Portfolio Value', color='blue', linewidth=1.5)
     plt.title(f'Equity Curve - {title}')
     plt.xlabel('Steps')
     plt.ylabel('Balance')
     plt.legend()
     plt.grid(True, alpha=0.3)
+    
     # Gem plottet i stedet for at vise det (bedre til HPC)
-    plt.savefig(f"backtest_{title.lower().replace(' ', '_')}.png")
-    print(f"Plot gemt som backtest_{title.lower().replace(' ', '_')}.png")
+    filename = f"backtest_{title.lower().replace(' ', '_')}.png"
+    plt.savefig(filename, bbox_inches='tight')
+    plt.close() # Lukker figuren for at frigøre hukommelse på serveren
+    print(f"Plot gemt som {filename}")
     
     return metrics

@@ -82,30 +82,115 @@ def train_and_save_model(i, seed, df_t, df_v, prices_t, prices_v, model_save_pat
     return save_path
 
 class EnsembleModel:
-    def __init__(self, models):
+    """
+    Attention-baseret Soft Ensemble (Meta-Learner).
+    Bruger rullende Sharpe Ratio og Softmax til at vægte forudsigelser fra modellerne.
+    """
+    def __init__(self, models, window_size=50):
         self.models = models
-        print(f"Ensemble initialized with {len(models)} models.")
+        self.n_models = len(models)
+        self.window_size = window_size
+        
+        # Buffer til at gemme hypotetiske afkast for hver model
+        self.model_returns = [[] for _ in range(self.n_models)]
+        self.last_target_positions = [0] * self.n_models
+        
+        print(f"Soft Voting Ensemble initialized med {self.n_models} modeller (Rullende vindue: {window_size} steps).")
+
+    def _get_action_probs(self, model, obs, state, episode_start):
+        """
+        Trækker aktions-sandsynlighederne (logits) ud af en RecurrentPPO policy.
+        """
+        import torch
+        with torch.no_grad(): # Vi træner ikke, så vi sparer hukommelse
+            # Konverter numpy observation til PyTorch tensor
+            obs_tensor, _ = model.policy.obs_to_tensor(obs)
+            
+            # Håndter LSTM episode starts
+            starts_tensor = None
+            if episode_start is not None:
+                starts_tensor = torch.tensor(episode_start, dtype=torch.float32, device=model.device)
+            
+            # Kør data gennem modellens netværk
+            features = model.policy.extract_features(obs_tensor)
+            latent_pi, _, _ = model.policy.mlp_extractor(features, state, starts_tensor)
+            
+            # Få selve fordelingen (sandsynligheder for Hold, Long, Short)
+            distribution = model.policy.action_net.get_action_dist_from_latent(latent_pi)
+            probs = distribution.distribution.probs.cpu().numpy()[0]
+            
+        return probs
 
     def predict(self, obs, state=None, episode_start=None, deterministic=True):
-        from scipy import stats 
+        import numpy as np
+        from scipy.special import softmax
         
         if state is None:
-            state = [None] * len(self.models)
+            state = [None] * self.n_models
         
-        all_actions = []
         new_states = []
+        all_probs = []
         
+        # 1. Udregn dynamiske vægte baseret på Rullende Sharpe Ratio
+        weights = np.ones(self.n_models) / self.n_models  # Default: ligelig fordeling
+        
+        # Vi skal bruge lidt data, før vi kan straffe/belønne modeller
+        if len(self.model_returns[0]) > 10: 
+            sharpes = []
+            for i in range(self.n_models):
+                rets = np.array(self.model_returns[i])
+                mean_ret = np.mean(rets)
+                std_ret = np.std(rets) + 1e-9 # Undgå division med nul
+                
+                # Udregn Sharpe
+                sharpe = mean_ret / std_ret
+                sharpes.append(sharpe)
+            
+            # Softmax konverterer Sharpe Ratios til procentsatser (der summerer til 1.0)
+            # 'temperature' justerer hvor aggressivt vi straffer dårlige modeller (lavere temp = hårdere straf)
+            temperature = 1.0 
+            weights = softmax(np.array(sharpes) / temperature)
+
+        # 2. Indhent forudsigelser og fordelinger fra hver model
         for i, model in enumerate(self.models):
             model_state = state[i]
-            action, next_state = model.predict(obs, state=model_state, episode_start=episode_start, deterministic=deterministic)
             
-            all_actions.append(action)
+            # Få den valgte handling og det nye LSTM state
+            action, next_state = model.predict(obs, state=model_state, episode_start=episode_start, deterministic=deterministic)
             new_states.append(next_state)
             
-        mode_result = stats.mode(all_actions, axis=0, keepdims=False)
-        final_action = mode_result.mode
+            # Hent de bagvedliggende sandsynligheder for denne beslutning
+            probs = self._get_action_probs(model, obs, model_state, episode_start)
+            all_probs.append(probs)
+            
+            # Gem modellens "ønskede position" så vi kan beregne dens PnL i næste step
+            target_pos = 0
+            if action == 1: target_pos = 1
+            elif action == 2: target_pos = -1
+            self.last_target_positions[i] = target_pos
+
+        # 3. SOFT VOTING: Gang hver models fordeling med dens Sharpe-vægt
+        weighted_probs = np.zeros(3)
+        for i in range(self.n_models):
+            weighted_probs += weights[i] * all_probs[i]
+            
+        # Den endelige handling er den, der har den højeste samlede sandsynlighed
+        final_action = int(np.argmax(weighted_probs))
         
         return final_action, new_states
+
+    def update_performance(self, market_return):
+        """
+        Beregner hvad hver model VILLE have tjent, og opdaterer deres track-record.
+        """
+        for i in range(self.n_models):
+            # Hypotetisk afkast: (Modellens valg) * (Markedets bevægelse)
+            hypothetical_return = self.last_target_positions[i] * market_return
+            self.model_returns[i].append(hypothetical_return)
+            
+            # Fjern det ældste afkast, så vi kun kigger på de seneste 'window_size' steps
+            if len(self.model_returns[i]) > self.window_size:
+                self.model_returns[i].pop(0)
 
     def save(self, path):
         pass
