@@ -1,0 +1,60 @@
+#!/bin/bash
+#SBATCH --job-name=trading_agent_train   # Meaningful name for your job
+#SBATCH --output=trading_agent_%j.out    # Standard output log (%j replaces with unique job ID)
+#SBATCH --error=trading_agent_%j.err     # Separate error log for easier debugging
+#SBATCH --nodes=1                        # Run on a single node
+#SBATCH --cpus-per-task=4                # Adjust based on your training data-loader parallelism
+#SBATCH --gres=gpu:a30:1                 # Request 1 dedicated GPU (e.g., NVIDIA A30)
+#SBATCH --time=23:59:00                  # Keep within the maximal 24-hour limit for standard/scavenge queues
+#SBATCH --partition=scavenge             # Use scavenge for high availability (or 'acltr' if priority permitted)
+
+# 1. Load Required HPC Modules
+# We explicitly load Python, CUDA, and PyTorch packages provided natively by the cluster 
+module purge
+module load CUDA/12.1.1
+module load Python/3.11.3-GCCcore-12.3.0
+module load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
+
+# 2. Define Tracking & Directory Layout Paths 
+echo "Starting job execution on host: $(hostname)"
+SUBMISSION_DIR="${SLURM_SUBMIT_DIR}"                         # Automatically tracks where you typed 'sbatch'
+SCRATCH_DIR="/scratch/${SLURM_JOB_ID}"                       # Fast storage on the physical worker node 
+OUTPUT_DIR="${SUBMISSION_DIR}/results"                       # Where you want final weights/logs saved
+
+# 3. Define a Safe Cleanup Function (Triggered on completion, errors, or cancellation)
+cleanup() {
+    echo "Executing scratch cleanup sequence..."
+    if [ -d "$SCRATCH_DIR" ]; then
+        rm -rf "$SCRATCH_DIR"                                # Cleans node's storage to remain a good citizen 
+    fi
+}
+trap cleanup EXIT INT TERM
+
+# 4. Spin up Scratch Directory Environment & Stage Project Data
+mkdir -p "$SCRATCH_DIR"
+mkdir -p "$OUTPUT_DIR"
+
+echo "Staging environment files to fast scratch storage..."
+cp -r "${SUBMISSION_DIR}/." "$SCRATCH_DIR/"
+cd "$SCRATCH_DIR" || exit 1
+
+# 5. Handle Requirements with PyTorch & Extra Dependencies 
+# Create a localized virtual environment inheriting the cluster's base optimized PyTorch/CUDA builds
+python3 -m venv --system-site-packages hpc_env
+source hpc_env/bin/activate
+
+# Install your extra requirements (like gymnasium, stable-baselines3, optuna, polars) missing from base modules 
+echo "Checking and verifying project requirement dependencies..."
+pip install --quiet --no-cache-dir -r requirements.txt 
+
+# 6. Run Your Training Pipeline
+echo "Executing Main Agent Pipeline..."
+python3 main.py > training_execution.log 2>&1
+JOB_STATUS=$?
+
+# 7. Safe Syncing Back of Artifacts & Model Weights to Home Directory
+echo "Synchronizing training outputs back to home directory storage..."
+# Sync everything back but safely exclude the heavy virtual env block we spun up locally
+rsync -av --exclude='hpc_env' "$SCRATCH_DIR/" "$OUTPUT_DIR/"
+
+exit $JOB_STATUS
