@@ -3,9 +3,9 @@ import random
 import numpy as np
 import pandas as pd
 import torch
-os.environ["OMP_NUM_THREADS"] = "6"
-os.environ["MKL_NUM_THREADS"] = "6"
-os.environ["OPENBLAS_NUM_THREADS"] = "6"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 import dataloading
 import features
@@ -62,30 +62,64 @@ VAL_START_DATE  = "2024-01-01"
 
 def train_and_save_model(i, seed, df_t, df_v, prices_t, prices_v, model_save_path, gpu_id=0):
     import torch
-    torch.set_num_threads(6) 
+    import gc
+    torch.set_num_threads(1) 
     
-    print(f"--> Starter Model {i+1} (Seed: {seed}) på GPU {gpu_id} med 16 parallelle CPU-miljøer...")
+    final_model_path = os.path.join(model_save_path, f"model_seed_{seed}.zip")
+    checkpoint_dir = os.path.join(model_save_path, f"checkpoints_seed_{seed}")
+    
+    # Skip hvis modellen allerede er færdigtrænet fra et tidligere job
+    if os.path.exists(final_model_path):
+        print(f"<-- Model {i+1} (Seed: {seed}) allerede færdigtrænet. Springer over.")
+        return final_model_path
+    
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # CheckpointCallback: gem modeltilstand periodisk for at overleve SLURM timeouts
+    from stable_baselines3.common.callbacks import CheckpointCallback
+    checkpoint_callback = CheckpointCallback(
+        save_freq=500_000,
+        save_path=checkpoint_dir,
+        name_prefix="sac_checkpoint"
+    )
+    
+    # Find seneste checkpoint til resume efter afbrudt job
+    resume_path = None
+    checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith(".zip")] if os.path.exists(checkpoint_dir) else []
+    if checkpoints:
+        checkpoints.sort(key=lambda x: int(''.join(filter(str.isdigit, x)) or '0'))
+        resume_path = os.path.join(checkpoint_dir, checkpoints[-1])
+        print(f"--> [RESUME] Model {i+1} (Seed: {seed}) genoptages fra: {resume_path}")
+    else:
+        print(f"--> [START] Starter Model {i+1} (Seed: {seed}) på GPU {gpu_id}...")
+    
     model = trade.train_agent(
         train_df=df_t, 
         val_df=df_v, 
         raw_prices_train=prices_t,
         raw_prices_val=prices_v,
         seed=seed,
-        total_timesteps=15_000_000, # Øget til 15M for at udnytte HPC tidsbudgettet optimalt
-        gpu_id=gpu_id
+        total_timesteps=15_000_000,
+        gpu_id=gpu_id,
+        callback=checkpoint_callback,
+        resume_path=resume_path
     )
-    save_path = os.path.join(model_save_path, f"model_seed_{seed}.zip")
-    model.save(save_path)
+    model.save(final_model_path)
     
-    # --- HARDCORE MEMORY CLEANUP FOR HPC/SLURM ---
+    # Ryd op i midlertidige checkpoints efter succesfuld træning
+    try:
+        shutil.rmtree(checkpoint_dir)
+    except Exception:
+        pass
+    
+    # --- MEMORY CLEANUP FOR HPC/SLURM ---
     del model
-    import gc
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         
     print(f"<-- Model {i+1} (Seed: {seed}) er FÆRDIG og gemt!")
-    return save_path
+    return final_model_path
 
 class EnsembleModel:
     """
@@ -221,19 +255,23 @@ def run_pipeline():
     
     print(f"Selected {len(selected_cols)} features (dropped {len(X_train_scaled.columns) - len(selected_cols)} flat features).")
 
-    print("\n--- 4.8. RUNNING HYPERPARAMETER TUNING (ONCE) ---")
-    print("Forventet Tuning Tid: ~20-30 timer på GPU (150 trials x 3 folds på 8 Subproc VecEnvs)")
-    tune.run_tuning(
-        train_feat=train_final,
-        val_feat=val_final,
-        train_prices=prices_train_aligned,
-        val_prices=prices_val_aligned,
-        n_trials=150,
-        total_timesteps=500_000 
-    )
+    print("\n--- 4.8. HYPERPARAMETER TUNING ---")
+    if os.path.exists("best_hyperparams.txt") and os.path.getsize("best_hyperparams.txt") > 10:
+        print("  best_hyperparams.txt fundet. Springer tuning over og bruger eksisterende parametre.")
+    else:
+        print("  Ingen eksisterende parametre fundet. Starter tuning...")
+        print("  Forventet Tuning Tid: ~3-5 timer på GPU (50 trials x 2 folds x 200k steps)")
+        tune.run_tuning(
+            train_feat=train_final,
+            val_feat=val_final,
+            train_prices=prices_train_aligned,
+            val_prices=prices_val_aligned,
+            n_trials=50,
+            total_timesteps=250_000 
+        )
 
-    print("\n--- 5. TRAINING ENSEMBLE (WITH BLOCK BOOTSTRAPPING) ---")
-    print("Forventet Trænings Tid: Fuld udnyttelse af 48h. (21 modeller parallelt x 15M steps)")
+    print("\n--- 5. TRAINING ENSEMBLE (WITH BLOCK BOOTSTRAPPING & CHECKPOINTING) ---")
+    print("Kører 21 modeller sekventielt med periodisk checkpointing for SLURM-resume.")
     
     ensemble_models = []
     n_models = 21 # Ujævnt tal for at bryde 'ties' og maksimere ensemble styrke
@@ -259,7 +297,7 @@ def run_pipeline():
         
         return df_feat.iloc[mask].copy(), df_prices.iloc[mask].copy()
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=n_models, mp_context=mp_context) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_gpus, mp_context=mp_context) as executor:
         futures = []
         # Opretter processer med maksimal load balanceret over GPU'er
         for i, seed in enumerate(model_seeds):
@@ -272,7 +310,10 @@ def run_pipeline():
             ))
 
         for future in concurrent.futures.as_completed(futures):
-            future.result()  
+            try:
+                future.result()
+            except Exception as e:
+                print(f"[CRITICAL] En underproces fejlede: {e}")
 
     print("\nAlle modeller er færdigtrænet! Indlæser dem nu til backtest...")
 

@@ -130,15 +130,29 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices, n_trials=20, tota
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 
-        trial.set_user_attr("net_arch", net_arch_type)
+        trial.set_user_attr("net_arch", net_arch)
         
         # Returner gennemsnittet af CPCV reward
         return float(np.mean(cv_rewards))
 
-    print("--- Starting Optuna Study ---")
-    study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
+    print("--- Starting Optuna Study (SQLite-backed for SLURM resume) ---")
+    storage = "sqlite:///optuna_study.db"
+    study = optuna.create_study(
+        study_name="quantforge_tuning",
+        storage=storage,
+        direction="maximize",x
+        pruner=optuna.pruners.MedianPruner(),
+        load_if_exists=True
+    )
     
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=True, n_jobs=2) # Parallelliseret tuning
+    # Resume: spring afsluttede trials over
+    completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+    remaining = max(0, n_trials - completed)
+    if remaining > 0:
+        print(f"  Fundet {completed} færdige trials. Kører {remaining} mere...")
+        study.optimize(objective, n_trials=remaining, show_progress_bar=True, n_jobs=1)
+    else:
+        print(f"  Alle {n_trials} trials allerede fuldført. Springer tuning over.")
     
     print("\n--- Tuning Complete ---")
     print("Best Params:", study.best_params)

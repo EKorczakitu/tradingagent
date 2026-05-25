@@ -8,7 +8,7 @@ from typing import Callable
 
 from stable_baselines3 import SAC
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor, VecFrameStack
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import EvalCallback, CallbackList
 from stable_baselines3.common.utils import set_random_seed
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
@@ -109,7 +109,7 @@ def make_env(rank, df_features, df_raw, spread=0.001, seed=0):
         return env
     return _init
 
-def train_agent(train_df, val_df, raw_prices_train, raw_prices_val, seed=None, total_timesteps=15_000_000, gpu_id=0):
+def train_agent(train_df, val_df, raw_prices_train, raw_prices_val, seed=None, total_timesteps=15_000_000, gpu_id=0, callback=None, resume_path=None):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     
     if seed is not None:
@@ -136,35 +136,50 @@ def train_agent(train_df, val_df, raw_prices_train, raw_prices_val, seed=None, t
         log_path=LOG_DIR, eval_freq=10000, n_eval_episodes=1, deterministic=True, verbose=0
     )
 
-    # CRITICAL FIX: Nu peger vi på PatchTSTExtractor
-    policy_kwargs = dict(
-        features_extractor_class=PatchTSTExtractor,
-        features_extractor_kwargs=dict(
-            window_size=window_size,
-            features_dim=128,
-            patch_len=5,
-            n_heads=4,
-            n_layers=2
-        ),
-        net_arch=net_arch,
-        activation_fn=nn.GELU # SOTA activation for RL/Transformers
-    )
+    # Saml alle callbacks (EvalCallback + evt. CheckpointCallback fra main.py)
+    all_callbacks = [eval_callback]
+    if callback is not None:
+        all_callbacks.append(callback)
+    merged_callback = CallbackList(all_callbacks)
 
-    model = SAC(
-        "MlpPolicy",
-        env,
-        verbose=1,
-        learning_rate=params['learning_rate'],
-        buffer_size=100000,
-        learning_starts=1000,
-        batch_size=params['batch_size'],
-        ent_coef=params.get('ent_coef', 'auto'),
-        gamma=params['gamma'],
-        policy_kwargs=policy_kwargs,
-        seed=seed
-    )
+    if resume_path is not None:
+        # Resume fra et checkpoint efter SLURM timeout
+        print(f"  [RESUME] Indlæser model fra: {resume_path}")
+        model = SAC.load(resume_path, env=env)
+        remaining_steps = max(0, total_timesteps - model.num_timesteps)
+        print(f"  [RESUME] Model var ved step {model.num_timesteps}, træner {remaining_steps} steps mere.")
+        if remaining_steps > 0:
+            model.learn(total_timesteps=remaining_steps, callback=merged_callback, progress_bar=True, reset_num_timesteps=False)
+    else:
+        # CRITICAL FIX: Nu peger vi på PatchTSTExtractor
+        policy_kwargs = dict(
+            features_extractor_class=PatchTSTExtractor,
+            features_extractor_kwargs=dict(
+                window_size=window_size,
+                features_dim=128,
+                patch_len=5,
+                n_heads=4,
+                n_layers=2
+            ),
+            net_arch=net_arch,
+            activation_fn=nn.GELU # SOTA activation for RL/Transformers
+        )
 
-    model.learn(total_timesteps=total_timesteps, callback=eval_callback, progress_bar=True)
+        model = SAC(
+            "MlpPolicy",
+            env,
+            verbose=1,
+            learning_rate=params['learning_rate'],
+            buffer_size=100000,
+            learning_starts=1000,
+            batch_size=params['batch_size'],
+            ent_coef=params.get('ent_coef', 'auto'),
+            gamma=params['gamma'],
+            policy_kwargs=policy_kwargs,
+            seed=seed
+        )
+
+        model.learn(total_timesteps=total_timesteps, callback=merged_callback, progress_bar=True)
     
     best_model_path = os.path.join(f"{MODEL_DIR}/seed_{seed}" if seed is not None else MODEL_DIR, "best_model.zip")
     if os.path.exists(best_model_path):
