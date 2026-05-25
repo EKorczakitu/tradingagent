@@ -6,8 +6,9 @@ import torch
 import torch.nn as nn
 
 # --- Library Imports ---
-from stable_baselines3 import PPO # Ændret fra RecurrentPPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack # Tilføjet VecFrameStack
+from optuna.pruners import MedianPruner
+from stable_baselines3 import SAC
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack # Tilføjet VecFrameStack
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
@@ -15,110 +16,129 @@ from stable_baselines3.common.monitor import Monitor
 # --- Local Imports ---
 from trading_env import TradingEnv
 # Vi importerer din nye Custom Transformer fra trade.py
-from trade import AdvancedQuantTransformer
+import trade
 
-def run_tuning(train_feat, val_feat, train_prices, val_prices):
+def generate_purged_cv_splits(n_samples, n_splits=3, purge_size=20):
+    # Combinatorial Purged Cross-Validation (CPCV) logic (Simplified for HPC)
+    # Deler data op i tids-blokke, og efterlader en "purge" margin mellem train og val
+    fold_size = n_samples // n_splits
+    splits = []
+    for i in range(n_splits - 1):
+        train_end = (i + 1) * fold_size - purge_size
+        val_start = (i + 1) * fold_size + purge_size
+        val_end = (i + 2) * fold_size
+        splits.append(( (0, train_end), (val_start, val_end) ))
+    return splits
+
+def run_tuning(train_feat, val_feat, train_prices, val_prices, n_trials=20, total_timesteps=100_000):
     print("\n--- Starting Optuna Tuning (Transformer HPC Mode) ---")
     print(f"Tuning Input Data -> Train: {train_feat.shape}, Val: {val_feat.shape}")
     
+    cv_splits = generate_purged_cv_splits(len(train_feat), n_splits=3, purge_size=24) # 24 timers purge
+
     def objective(trial):
         # --- 1. Suggest Hyperparameters ---
-        learning_rate = trial.suggest_float("learning_rate", 1e-5, 5e-4, log=True)
-        gamma = trial.suggest_float("gamma", 0.95, 0.995)
-        gae_lambda = trial.suggest_float("gae_lambda", 0.90, 1.0)
-        ent_coef = trial.suggest_float("ent_coef", 1e-6, 0.01, log=True)
-        max_grad_norm = trial.suggest_float("max_grad_norm", 0.3, 1.0)
+        learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-3, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [64, 128, 256, 512])
+        gamma = trial.suggest_categorical("gamma", [0.95, 0.98, 0.99, 0.995, 0.999])
         
-        # Reduceret net_arch størrelser for at spare hukommelse med Transformeren
-        net_arch_type = trial.suggest_categorical("net_arch", ["small", "medium"])
-        if net_arch_type == "small":
-            net_arch = dict(pi=[64, 64], vf=[64, 64])
-        elif net_arch_type == "medium":
-            net_arch = dict(pi=[128, 128], vf=[128, 128])
-
-        n_steps = trial.suggest_categorical("n_steps", [2048, 4096])
-        batch_size = trial.suggest_categorical("batch_size", [512, 1024])
+        # SAC har ikke ent_coef på samme måde som PPO, men auto er default. Vi tuner initial value af auto ent_coef eller sætter den fast.
+        # Vi tuner i stedet tau (polyak averaging) for target network
+        tau = trial.suggest_categorical("tau", [0.005, 0.01, 0.02, 0.05])
         
-        # --- NYT: TST Hyperparameter ---
-        # Hvor mange fortidige timer skal Attention-mekanismen kigge på ad gangen?
+        net_arch = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
         window_size = trial.suggest_categorical("window_size", [10, 20, 30])
         
-        if batch_size > n_steps:
-            batch_size = n_steps
+        params = {
+            'learning_rate': learning_rate,
+            'batch_size': batch_size,
+            'gamma': gamma,
+            'tau': tau,
+            'net_arch': net_arch,
+            'window_size': window_size
+        }
 
         # --- 2. Setup Environments med VecFrameStack ---
-        train_env = DummyVecEnv([lambda: Monitor(TradingEnv(train_feat, train_prices))])
-        train_env = VecFrameStack(train_env, n_stack=window_size)
-        
-        val_env = DummyVecEnv([lambda: Monitor(TradingEnv(val_feat, val_prices))])
-        val_env = VecFrameStack(val_env, n_stack=window_size)
-
-        # --- 3. Define Model (PPO med Transformer Extractor) ---
-        policy_kwargs = dict(
-            features_extractor_class=AdvancedQuantTransformer,
-            features_extractor_kwargs=dict(
-                window_size=window_size,
-                features_dim=128,
-                n_heads=4,
-                n_layers=2,
-                d_model=64
-            ),
-            net_arch=net_arch,
-            activation_fn=nn.Tanh
-        )
-
-        model = PPO(
-            "MlpPolicy",
-            train_env,
-            learning_rate=learning_rate,
-            n_steps=n_steps,
-            batch_size=batch_size,
-            gamma=gamma,
-            gae_lambda=gae_lambda,
-            ent_coef=ent_coef,
-            max_grad_norm=max_grad_norm,
-            policy_kwargs=policy_kwargs,
-            verbose=0,
-            device="cuda" if torch.cuda.is_available() else "cpu"
-        )
-        
-        # --- 4. Train with Early Stopping ---
-        eval_callback = EvalCallback(
-            val_env, 
-            best_model_save_path=None,
-            log_path=None, 
-            eval_freq=50000,
-            n_eval_episodes=1,
-            deterministic=True, 
-            render=False
-        )
-        
-        try:
-            # Optuna behøver ikke køre 1 mio. steps pr. trial. 300k er nok til at finde retningen.
-            model.learn(total_timesteps=300_000, callback=eval_callback) 
-        except Exception as e:
-            print(f"Trial failed: {e}")
-            return -1000 
-        finally:
-            train_env.close()
+        # I stedet for et enkelt train/val split, udfører vi Purged Cross-Validation
+        cv_rewards = []
+        for fold, (train_idx, val_idx) in enumerate(cv_splits):
+            train_f = train_feat.iloc[train_idx[0]:train_idx[1]]
+            train_p = train_prices.iloc[train_idx[0]:train_idx[1]]
             
-        # --- 5. Evaluate Performance ---
-        mean_reward, _ = evaluate_policy(model, val_env, n_eval_episodes=1)
+            val_f = train_feat.iloc[val_idx[0]:val_idx[1]]
+            val_p = train_prices.iloc[val_idx[0]:val_idx[1]]
+
+            # Parallelize tuning environments
+            def make_train_env(i):
+                return lambda: Monitor(TradingEnv(train_f, train_p))
+            
+            def make_val_env(i):
+                return lambda: Monitor(TradingEnv(val_f, val_p))
+
+            train_env = SubprocVecEnv([make_train_env(i) for i in range(8)], start_method="spawn")
+            train_env = VecFrameStack(train_env, n_stack=window_size)
+
+            val_env = SubprocVecEnv([make_val_env(i) for i in range(4)], start_method="spawn")
+            val_env = VecFrameStack(val_env, n_stack=window_size)
+
+            # --- 3. Define Model (SAC med Transformer Extractor) ---
+            policy_kwargs = dict(
+                features_extractor_class=trade.PatchTSTExtractor,
+                features_extractor_kwargs=dict(
+                    window_size=params['window_size'],
+                    features_dim=128,
+                    patch_len=5,
+                    n_heads=4,
+                    n_layers=2
+                ),
+                net_arch=trade.get_net_arch(params['net_arch']),
+                activation_fn=torch.nn.GELU
+            )
+
+            model = SAC(
+                "MlpPolicy",
+                train_env,
+                verbose=0,
+                learning_rate=params['learning_rate'],
+                buffer_size=50000,
+                learning_starts=1000,
+                batch_size=params['batch_size'],
+                tau=params['tau'],
+                gamma=params['gamma'],
+                policy_kwargs=policy_kwargs,
+                seed=42
+            )
+            
+            # Kortere total_timesteps pr. fold for at spare tid
+            try:
+                model.learn(total_timesteps=total_timesteps) 
+            except Exception as e:
+                print(f"Trial fold {fold} failed: {e}")
+                return -1000 
+            finally:
+                train_env.close()
+                
+            # Evaluate current fold
+            mean_reward, _ = evaluate_policy(model, val_env, n_eval_episodes=1)
+            cv_rewards.append(mean_reward)
+            val_env.close()
+
+            # Oprydning
+            del model
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
         trial.set_user_attr("net_arch", net_arch_type)
-
-        # --- Tving GPU til at rydde op ---
-        del model
-        import gc
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            
-        return mean_reward
+        
+        # Returner gennemsnittet af CPCV reward
+        return float(np.mean(cv_rewards))
 
     print("--- Starting Optuna Study ---")
     study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
     
-    study.optimize(objective, n_trials=20, show_progress_bar=True)
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True, n_jobs=2) # Parallelliseret tuning
     
     print("\n--- Tuning Complete ---")
     print("Best Params:", study.best_params)

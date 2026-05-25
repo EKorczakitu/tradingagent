@@ -66,9 +66,16 @@ def print_report(metrics, title="Backtest Resultater"):
 def run_backtest_engine(env, model, title="Test Set"):
     """
     Kører agenten igennem miljøet og samler statistik.
-    Understøtter nu RNN/LSTM states og dynamisk ensemble feedback.
+    Understøtter nu RNN/LSTM states, dynamisk ensemble feedback og VecEnv (VecFrameStack).
     """
-    obs, _ = env.reset()
+    # Tjek om vi arbejder med en Stable-Baselines3 VecEnv eller en standard Gym Env
+    is_vec_env = hasattr(env, 'num_envs')
+    
+    if is_vec_env:
+        obs = env.reset()
+    else:
+        obs, _ = env.reset()
+
     done = False
     truncated = False
     
@@ -78,7 +85,19 @@ def run_backtest_engine(env, model, title="Test Set"):
     
     returns_log = []
     actions_log = []
-    portfolio_values = [env.balance_history[0]]
+    
+    # Hent start-balance
+    if is_vec_env:
+        # For VecEnv henter vi info fra den første (og eneste) env
+        initial_balance = 10000.0 # Standard fallback
+        try:
+            initial_balance = env.get_attr('balance_history')[0][0]
+        except:
+            pass
+    else:
+        initial_balance = env.balance_history[0]
+        
+    portfolio_values = [initial_balance]
     
     while not done and not truncated:
         # --- NYT: Send LSTM states med og grib de nye ---
@@ -89,7 +108,14 @@ def run_backtest_engine(env, model, title="Test Set"):
             deterministic=True
         )
         
-        obs, reward, done, truncated, info = env.step(action)
+        if is_vec_env:
+            obs, rewards, dones, infos = env.step(action)
+            reward = rewards[0]
+            done = dones[0]
+            info = infos[0]
+            truncated = info.get("TimeLimit.truncated", False)
+        else:
+            obs, reward, done, truncated, info = env.step(action)
         
         # Opdater episode_starts til næste loop
         episode_starts = np.array([done or truncated])

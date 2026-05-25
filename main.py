@@ -1,6 +1,8 @@
-import pandas as pd
-import numpy as np
 import os
+import random
+import numpy as np
+import pandas as pd
+import torch
 os.environ["OMP_NUM_THREADS"] = "6"
 os.environ["MKL_NUM_THREADS"] = "6"
 os.environ["OPENBLAS_NUM_THREADS"] = "6"
@@ -17,37 +19,31 @@ import sys
 import concurrent.futures
 import multiprocessing
 
-from stable_baselines3.common.vec_env import DummyVecEnv
-from sb3_contrib import RecurrentPPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+from stable_baselines3 import SAC
 
 # --- CUSTOM TRANSFORMER TIL AT FORHINDRE DATA LÆKAGE ---
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-class TrainQuantileWinsorizer(BaseEstimator, TransformerMixin):
-    """
-    Klipper outliers baseret på fraktiler udregnet UDELUKKENDE fra træningsdata.
-    Dette forhindrer distribution shift og fremtids-lækage.
-    """
-    def __init__(self, lower_q=0.001, upper_q=0.999):
-        self.lower_q = lower_q
-        self.upper_q = upper_q
-        self.lower_bounds_ = None
-        self.upper_bounds_ = None
-        
-    def fit(self, X, y=None):
-        # Gemmer de specifikke værdi-grænser for hver kolonne fra træningssættet
-        self.lower_bounds_ = X.quantile(self.lower_q)
-        self.upper_bounds_ = X.quantile(self.upper_q)
-        return self
-        
-    def transform(self, X, y=None):
-        # Bruger de GEMTE grænser til at klippe nye (val/test) data
-        return X.clip(lower=self.lower_bounds_, upper=self.upper_bounds_, axis=1)
+# TrainQuantileWinsorizer er fjernet, da vi nu bruger dynamisk rullende z-score i features.py
 
-# --- HARDCORE SIKKERHED MOD TMP FEJL ---
+# --- HPC SIKKERHED OG OPTIMERING ---
+# Tillad TensorFloat-32 for massiv matrix speedup på Ampere A100 GPU'er
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 # Tjek om vi kører på HPC (hvis TMPDIR er sat)
+try:
+    tmpdir = os.environ.get('TMPDIR')
+    if tmpdir:
+        print(f"Running with TMPDIR: {tmpdir}")
+    else:
+        print("Running with TMPDIR: Not Set")
+except Exception as e:
+    pass
+
 if "TMPDIR" in os.environ:
     if os.environ["TMPDIR"].startswith("/home"):
         print(f"CRITICAL WARNING: TMPDIR is set to {os.environ['TMPDIR']} (Network Drive).")
@@ -64,20 +60,30 @@ MODEL_SAVE_PATH = "models/ppo_ensemble"
 TEST_START_DATE = "2025-01-01"
 VAL_START_DATE  = "2024-01-01"
 
-def train_and_save_model(i, seed, df_t, df_v, prices_t, prices_v, model_save_path):
+def train_and_save_model(i, seed, df_t, df_v, prices_t, prices_v, model_save_path, gpu_id=0):
     import torch
     torch.set_num_threads(6) 
     
-    print(f"--> Starter Model {i+1} (Seed: {seed}) på sin egen proces med 6 tråde...")
+    print(f"--> Starter Model {i+1} (Seed: {seed}) på GPU {gpu_id} med 16 parallelle CPU-miljøer...")
     model = trade.train_agent(
         train_df=df_t, 
         val_df=df_v, 
         raw_prices_train=prices_t,
         raw_prices_val=prices_v,
-        seed=seed
+        seed=seed,
+        total_timesteps=15_000_000, # Øget til 15M for at udnytte HPC tidsbudgettet optimalt
+        gpu_id=gpu_id
     )
     save_path = os.path.join(model_save_path, f"model_seed_{seed}.zip")
     model.save(save_path)
+    
+    # --- HARDCORE MEMORY CLEANUP FOR HPC/SLURM ---
+    del model
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
     print(f"<-- Model {i+1} (Seed: {seed}) er FÆRDIG og gemt!")
     return save_path
 
@@ -147,21 +153,6 @@ class EnsembleModel:
 
     def update_performance(self, market_return):
         """
-        Beregner hvad hver model VILLE have tjent med deres float-positioner.
-        """
-        for i in range(self.n_models):
-            # Float-allokering * market return
-            hypothetical_return = self.last_target_positions[i] * market_return
-            self.model_returns[i].append(hypothetical_return)
-            
-            if len(self.model_returns[i]) > self.window_size:
-                self.model_returns[i].pop(0)
-
-    def save(self, path):
-        pass
-
-    def update_performance(self, market_return):
-        """
         Beregner hvad hver model VILLE have tjent, og opdaterer deres track-record.
         """
         for i in range(self.n_models):
@@ -177,7 +168,7 @@ class EnsembleModel:
         pass
 
 def run_pipeline():
-    print("\n--- 1. STARTING PIPELINE (HPC MODE - ENSEMBLE 9 MODELS) ---")
+    print("\n--- 1. STARTING PIPELINE (HPC MODE - ENSEMBLE 21 MODELS) ---")
 
     print("Loading data and generating features...")
     df_full = dataloading.get_full_dataset()
@@ -196,37 +187,15 @@ def run_pipeline():
     prices_full = df_full.copy()
 
     # --- TRIN 3: NORMALISERING & CLEANING ---
-    print("\n--- 3. NORMALIZING ---")
+    print("\n--- 3. DATA CLEANING (SCALING ER NU INDLEJRET I FEATURES.PY) ---")
     
-    # Fjern NaNs fra træningssættet inden vi lærer fordelingerne
-    X_train_clean = X_train.dropna().copy()
-    
-    # Opret pipelinen: Først klipper vi (Winsorizer), derefter skalerer vi
-    prep_pipeline = Pipeline([
-        ('winsorizer', TrainQuantileWinsorizer(lower_q=0.001, upper_q=0.999)),
-        ('scaler', StandardScaler())
-    ])
-    
-    # Vi kalder FIT KUN PÅ TRÆNINGSDATA. Dette fastlåser fraktiler og z-score gennemsnit.
-    X_train_scaled_array = prep_pipeline.fit_transform(X_train_clean)
-    X_train_scaled = pd.DataFrame(X_train_scaled_array, columns=X_train_clean.columns, index=X_train_clean.index)
-    
-    def process_split(df_feat, fitted_pipeline):
-        # Her har vi fjernet det hardcodede .clip() og lader i stedet pipelinen 
-        # udføre magien med de grænser, den lærte fra X_train.
-        df_clean = df_feat.dropna().copy()
-        data_scaled_array = fitted_pipeline.transform(df_clean)
-        return pd.DataFrame(data_scaled_array, columns=df_clean.columns, index=df_clean.index)
-
-    # Transformér Validation og Test med den trænede pipeline
-    X_val_scaled  = process_split(X_val, prep_pipeline)
-    X_test_scaled = process_split(X_test, prep_pipeline)
+    X_train_scaled = X_train.dropna().copy()
+    X_val_scaled  = X_val.dropna().copy()
+    X_test_scaled = X_test.dropna().copy()
     
     print(f"Cleaned shapes -> Train: {X_train_scaled.shape}, Val: {X_val_scaled.shape}, Test: {X_test_scaled.shape}")
 
     # --- TRIN 4: FEATURE SELECTION (VARIANCE THRESHOLD) ---
-    # ... (Resten af din pipeline fra TRIN 4 og frem forbliver uændret) ...
-    
     print("\n--- 4. FEATURE SELECTION (KEEPING CONTEXT) ---")
     from sklearn.feature_selection import VarianceThreshold
     
@@ -253,18 +222,25 @@ def run_pipeline():
     print(f"Selected {len(selected_cols)} features (dropped {len(X_train_scaled.columns) - len(selected_cols)} flat features).")
 
     print("\n--- 4.8. RUNNING HYPERPARAMETER TUNING (ONCE) ---")
+    print("Forventet Tuning Tid: ~20-30 timer på GPU (150 trials x 3 folds på 8 Subproc VecEnvs)")
     tune.run_tuning(
         train_feat=train_final,
         val_feat=val_final,
         train_prices=prices_train_aligned,
-        val_prices=prices_val_aligned
+        val_prices=prices_val_aligned,
+        n_trials=150,
+        total_timesteps=500_000 
     )
 
     print("\n--- 5. TRAINING ENSEMBLE (WITH BLOCK BOOTSTRAPPING) ---")
+    print("Forventet Trænings Tid: Fuld udnyttelse af 48h. (21 modeller parallelt x 15M steps)")
     
     ensemble_models = []
-    n_models = 5
+    n_models = 21 # Ujævnt tal for at bryde 'ties' og maksimere ensemble styrke
+    model_seeds = [42 + i for i in range(n_models)]
     
+    num_gpus = max(1, torch.cuda.device_count())
+    print(f"Opdaget {num_gpus} fysiske GPU'er til rådighed på noden.")
     os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
     mp_context = multiprocessing.get_context('spawn')
 
@@ -285,15 +261,14 @@ def run_pipeline():
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=n_models, mp_context=mp_context) as executor:
         futures = []
-        for i in range(n_models):
-            seed = 42 + i
-            
-            # Sub-sample træningsdata per agent for at undgå Ensemble Collapse
+        # Opretter processer med maksimal load balanceret over GPU'er
+        for i, seed in enumerate(model_seeds):
+            gpu_assigned = i % num_gpus
             train_feat_bagged, prices_train_bagged = apply_block_bootstrap(train_final, prices_train_aligned, seed)
             
             futures.append(executor.submit(
                 train_and_save_model, 
-                i, seed, train_feat_bagged, val_final, prices_train_bagged, prices_val_aligned, MODEL_SAVE_PATH
+                i, seed, train_feat_bagged, val_final, prices_train_bagged, prices_val_aligned, MODEL_SAVE_PATH, gpu_assigned
             ))
 
         for future in concurrent.futures.as_completed(futures):
@@ -301,20 +276,32 @@ def run_pipeline():
 
     print("\nAlle modeller er færdigtrænet! Indlæser dem nu til backtest...")
 
+    params = trade.get_optimal_params()
+    window_size = params.get('window_size', 20)
     dummy_env = DummyVecEnv([lambda: trading_env.TradingEnv(val_final, prices_val_aligned)])
+    dummy_env = VecFrameStack(dummy_env, n_stack=window_size)
 
     for i in range(n_models):
         seed = 42 + i
         save_path = os.path.join(MODEL_SAVE_PATH, f"model_seed_{seed}.zip")
-        loaded_model = RecurrentPPO.load(save_path, env=dummy_env)
-        ensemble_models.append(loaded_model)
+        try:
+            model = SAC.load(save_path, env=dummy_env)
+            ensemble_models.append(model)
+        except Exception as e:
+            print(f"Failed to load model {seed}: {e}")
 
     ensemble_agent = EnsembleModel(ensemble_models)
 
     print("\n--- 6. BACKTESTING ENSEMBLE ---")
     
-    env_val = trading_env.TradingEnv(val_final, prices_val_aligned)
-    env_test = trading_env.TradingEnv(test_final, prices_test_aligned)
+    params = trade.get_optimal_params()
+    window_size = params.get('window_size', 20)
+    
+    env_val = DummyVecEnv([lambda: trading_env.TradingEnv(val_final, prices_val_aligned)])
+    env_val = VecFrameStack(env_val, n_stack=window_size)
+    
+    env_test = DummyVecEnv([lambda: trading_env.TradingEnv(test_final, prices_test_aligned)])
+    env_test = VecFrameStack(env_test, n_stack=window_size)
     
     print("\n>>> VALIDATION SET RESULTS (ENSEMBLE):")
     backtest.run_backtest_engine(env_val, ensemble_agent, title="Validation Ensemble 2024")
