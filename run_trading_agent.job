@@ -21,11 +21,12 @@ module load Python/3.11.3-GCCcore-12.3.0
 module load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
 
 SUBMISSION_DIR="${SLURM_SUBMIT_DIR}"
-# SOTA FIX: Vi skifter fra /scratch til en job-isoleret mappe under /tmp for at undgå Permission Denied
 SCRATCH_DIR="/tmp/${USER}_job_${SLURM_JOB_ID}"
 OUTPUT_DIR="${SUBMISSION_DIR}/results"
 
+# Sikrer at alle output-kataloger eksisterer på netværksdrevet før start
 mkdir -p "$OUTPUT_DIR/models"
+mkdir -p "$OUTPUT_DIR/tuning_meta"
 mkdir -p "${SUBMISSION_DIR}/logs"
 
 echo "[QuantForge] Initierer job på host: $(hostname) med $SLURM_CPUS_PER_TASK allokerede kerner."
@@ -33,10 +34,14 @@ echo "[QuantForge] Bruger dedikeret job-storage: $SCRATCH_DIR"
 
 # 3. Safe Cleanup Trap med Sync-Før-Delete
 emergency_sync() {
-    echo "[QuantForge] SIGNAL MODTAGET: Synkroniserer delvise checkpoints til permanent storage..."
+    echo "[QuantForge] SIGNAL MODTAGET: Synkroniserer delvise checkpoints og tuning-state..."
     if [ -d "$SCRATCH_DIR/models" ]; then
         rsync -a "$SCRATCH_DIR/models/" "$OUTPUT_DIR/models/" 2>/dev/null || true
     fi
+    if [ -d "$SCRATCH_DIR/tuning_meta" ]; then
+        rsync -a "$SCRATCH_DIR/tuning_meta/" "$OUTPUT_DIR/tuning_meta/" 2>/dev/null || true
+    fi
+    [ -f "$SCRATCH_DIR/best_hyperparams.txt" ] && cp "$SCRATCH_DIR/best_hyperparams.txt" "$OUTPUT_DIR/" 2>/dev/null || true
     cleanup
     exit 1
 }
@@ -61,7 +66,12 @@ if [ -d "$OUTPUT_DIR/models" ]; then
     echo "[QuantForge] Gendanner tidligere model-checkpoints for resume..."
     rsync -a "$OUTPUT_DIR/models/" "$SCRATCH_DIR/models/" 2>/dev/null || true
 fi
-[ -f "$OUTPUT_DIR/optuna_study.db" ] && cp "$OUTPUT_DIR/optuna_study.db" "$SCRATCH_DIR/" 2>/dev/null || true
+if [ -d "$OUTPUT_DIR/tuning_meta" ]; then
+    echo "[QuantForge] Gendanner Optuna database fra tidligere kørsler..."
+    mkdir -p "$SCRATCH_DIR/tuning_meta"
+    rsync -a "$OUTPUT_DIR/tuning_meta/" "$SCRATCH_DIR/tuning_meta/" 2>/dev/null || true
+fi
+[ -f "$OUTPUT_DIR/best_hyperparams.txt" ] && cp "$OUTPUT_DIR/best_hyperparams.txt" "$SCRATCH_DIR/" 2>/dev/null || true
 
 cd "$SCRATCH_DIR" || exit 1
 
@@ -70,13 +80,12 @@ echo "[QuantForge] Bygger virtual environment..."
 python3 -m venv --system-site-packages hpc_env
 source hpc_env/bin/activate
 
-# Opgrader pip internt i det lukkede venv for at sikre moderne wheel-understøttelse
 pip install --quiet --upgrade pip
 
-echo "[QuantForge] Installerer projektafhængigheder (inkl. rettet Polars)..."
+echo "[QuantForge] Installerer projektafhængigheder..."
 pip install --quiet --no-cache-dir -r requirements.txt
 
-# 6. Eksekvering
+# 6. Eksekver Agent Pipeline
 echo "[QuantForge] Starter fejltolerant trænings-pipeline..."
 python3 main.py > training_execution.log 2>&1
 JOB_STATUS=$?
@@ -86,8 +95,10 @@ echo "[QuantForge] Job fuldført med status $JOB_STATUS. Synkroniserer artifacts
 if [ -d "$SCRATCH_DIR/models" ]; then
     rsync -a "$SCRATCH_DIR/models/" "$OUTPUT_DIR/models/"
 fi
-# Flyt log-filer og database med tilbage
+if [ -d "$SCRATCH_DIR/tuning_meta" ]; then
+    rsync -a "$SCRATCH_DIR/tuning_meta/" "$OUTPUT_DIR/tuning_meta/" 2>/dev/null || true
+fi
+[ -f "$SCRATCH_DIR/best_hyperparams.txt" ] && cp "$SCRATCH_DIR/best_hyperparams.txt" "$OUTPUT_DIR/" 2>/dev/null || true
 [ -f "$SCRATCH_DIR/training_execution.log" ] && cp "$SCRATCH_DIR/training_execution.log" "$SUBMISSION_DIR/logs/job_${SLURM_JOB_ID}_execution.log"
-[ -f "$SCRATCH_DIR/tuning_meta/optuna_study.db" ] && rsync -a "$SCRATCH_DIR/tuning_meta/" "$OUTPUT_DIR/tuning_meta/" 2>/dev/null || true
 
 exit $JOB_STATUS

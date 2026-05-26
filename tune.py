@@ -136,11 +136,12 @@ def run_tuning(train_feat, val_feat, train_prices, val_prices, n_trials=20, tota
         return float(np.mean(cv_rewards))
 
     print("--- Starting Optuna Study (SQLite-backed for SLURM resume) ---")
-    storage = "sqlite:///optuna_study.db"
+    os.makedirs("tuning_meta", exist_ok=True)
+    storage = "sqlite:///tuning_meta/optuna_study.db"
     study = optuna.create_study(
         study_name="quantforge_tuning",
         storage=storage,
-        direction="maximize",x
+        direction="maximize",
         pruner=optuna.pruners.MedianPruner(),
         load_if_exists=True
     )
