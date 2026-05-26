@@ -1,46 +1,48 @@
 #!/bin/bash
-#SBATCH --job-name=qf_novo_agent
+#SBATCH --job-name=qf_novo_production
 #SBATCH --output=logs/agent_%j.out
 #SBATCH --error=logs/agent_%j.err
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=10                # VIGTIGT: Sæt denne til (n_envs + 2). Antager her n_envs=8.
-#SBATCH --gres=gpu:a30:1                  # SLURM filtrerer automatisk inkompatible nodes fra (f.eks. desktops).
-#SBATCH --time=23:59:00                   # Vi respekterer 24t grænsen for hurtig allokering. Håndter resume via kode-checkpoints.
-#SBATCH --partition=acltr                 # Høj-prioritets accelerator partition.
+#SBATCH --cpus-per-task=10                # Svarer til (n_envs + 2) i dine sub-miljøer
+#SBATCH --gres=gpu:a30:1                  # Allokerer præcis 1 fysisk GPU
+#SBATCH --time=23:59:00                   # Overholder den hårde 24t grænsen
+#SBATCH --partition=acltr                 # Høj-prioritets accelerator partition
 
-# 1. Sikker Håndtering af Midlertidige Filer
-echo "[QuantForge] Konfigurerer lokalt TMPDIR..."
-mkdir -p $HOME/tmp 
-export TMPDIR=$HOME/tmp
+# 1. HPC TMPDIR-Hygiejne (Omdirigeret til en isoleret bruger-mappe på lokal disk)
+echo "[QuantForge] Konfigurerer lokalt TMPDIR under /tmp..."
+LOCAL_USER_TMP="/tmp/${USER}_hpc_jobs"
+mkdir -p "$LOCAL_USER_TMP"
+export TMPDIR="$LOCAL_USER_TMP"
 
-# 2. Load HPC Moduler 
+# 2. Load Native Optimerede Moduler
 module purge
 module load CUDA/12.1.1
 module load Python/3.11.3-GCCcore-12.3.0
 module load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1
 
-echo "[QuantForge] Initierer job på host: $(hostname) med $SLURM_CPUS_PER_TASK allokerede kerner."
-
-# 3. Definer Stier og Cleanup
 SUBMISSION_DIR="${SLURM_SUBMIT_DIR}"
-SCRATCH_DIR="/scratch/${SLURM_JOB_ID}"
+# SOTA FIX: Vi skifter fra /scratch til en job-isoleret mappe under /tmp for at undgå Permission Denied
+SCRATCH_DIR="/tmp/${USER}_job_${SLURM_JOB_ID}"
 OUTPUT_DIR="${SUBMISSION_DIR}/results"
 
-mkdir -p "$OUTPUT_DIR"
+mkdir -p "$OUTPUT_DIR/models"
 mkdir -p "${SUBMISSION_DIR}/logs"
 
-# Signal handler for SLURM timeout (SIGTERM) — synkroniser delvise resultater FØR sletning
+echo "[QuantForge] Initierer job på host: $(hostname) med $SLURM_CPUS_PER_TASK allokerede kerner."
+echo "[QuantForge] Bruger dedikeret job-storage: $SCRATCH_DIR"
+
+# 3. Safe Cleanup Trap med Sync-Før-Delete
 emergency_sync() {
-    echo "[QuantForge] SIGTERM/SIGINT modtaget! Nødsynkronisering af delvise resultater..."
-    if [ -d "$SCRATCH_DIR" ]; then
-        rsync -av --exclude='hpc_env' --exclude='data' "$SCRATCH_DIR/" "$OUTPUT_DIR/" 2>/dev/null || true
+    echo "[QuantForge] SIGNAL MODTAGET: Synkroniserer delvise checkpoints til permanent storage..."
+    if [ -d "$SCRATCH_DIR/models" ]; then
+        rsync -a "$SCRATCH_DIR/models/" "$OUTPUT_DIR/models/" 2>/dev/null || true
     fi
-    echo "[QuantForge] Nødsynkronisering afsluttet."
+    cleanup
     exit 1
 }
 
 cleanup() {
-    echo "[QuantForge] Rydder scratch op..."
+    echo "[QuantForge] Rydder op i midlertidig job-storage..."
     if [ -d "$SCRATCH_DIR" ]; then
         rm -rf "$SCRATCH_DIR"
     fi
@@ -49,36 +51,43 @@ cleanup() {
 trap emergency_sync TERM INT
 trap cleanup EXIT
 
-# 4. Optimeret Data Staging (Fast NVMe Storage)
+# 4. Optimeret Data Staging (Nu på det sikre /tmp drev)
 mkdir -p "$SCRATCH_DIR"
-echo "[QuantForge] Stager filer til hurtig scratch storage..."
+echo "[QuantForge] Stager kildekode til hurtig lokal storage..."
 rsync -a --exclude='.git' --exclude='Backup/' --exclude='logs/' --exclude='results/' "${SUBMISSION_DIR}/" "$SCRATCH_DIR/"
 
 # Gendan tidligere resultater (modeller, checkpoints, Optuna DB) til scratch for resume
-if [ -d "$OUTPUT_DIR" ]; then
-    echo "[QuantForge] Gendanner tidligere modeller og konfiguration til scratch for resume..."
+if [ -d "$OUTPUT_DIR/models" ]; then
+    echo "[QuantForge] Gendanner tidligere model-checkpoints for resume..."
     rsync -a "$OUTPUT_DIR/models/" "$SCRATCH_DIR/models/" 2>/dev/null || true
-    [ -f "$OUTPUT_DIR/best_hyperparams.txt" ] && cp "$OUTPUT_DIR/best_hyperparams.txt" "$SCRATCH_DIR/" 2>/dev/null || true
-    [ -f "$OUTPUT_DIR/optuna_study.db" ] && cp "$OUTPUT_DIR/optuna_study.db" "$SCRATCH_DIR/" 2>/dev/null || true
 fi
+[ -f "$OUTPUT_DIR/optuna_study.db" ] && cp "$OUTPUT_DIR/optuna_study.db" "$SCRATCH_DIR/" 2>/dev/null || true
 
 cd "$SCRATCH_DIR" || exit 1
 
-# 5. Opsætning af Virtual Environment
+# 5. Virtual Env over cluster-toolchain
 echo "[QuantForge] Bygger virtual environment..."
 python3 -m venv --system-site-packages hpc_env
 source hpc_env/bin/activate
 
-pip install --quiet --no-cache-dir -r requirements.txt 
+# Opgrader pip internt i det lukkede venv for at sikre moderne wheel-understøttelse
+pip install --quiet --upgrade pip
 
-# 6. Eksekver Agent Pipeline
-echo "[QuantForge] Træner asymmetrisk SOTA Agent..."
-# main.py vil nu have nok CPU-båndbredde til at fodre A30 GPU'en uden context-switching lag.
+echo "[QuantForge] Installerer projektafhængigheder (inkl. rettet Polars)..."
+pip install --quiet --no-cache-dir -r requirements.txt
+
+# 6. Eksekvering
+echo "[QuantForge] Starter fejltolerant trænings-pipeline..."
 python3 main.py > training_execution.log 2>&1
 JOB_STATUS=$?
 
-# 7. Sikker Synkronisering tilbage til Home
-echo "[QuantForge] Træning afsluttet (Status: $JOB_STATUS). Synkroniserer artifacts..."
-rsync -av --exclude='hpc_env' --exclude='data' "$SCRATCH_DIR/" "$OUTPUT_DIR/"
+# 7. Endelig Stage-Out
+echo "[QuantForge] Job fuldført med status $JOB_STATUS. Synkroniserer artifacts til permanent storage..."
+if [ -d "$SCRATCH_DIR/models" ]; then
+    rsync -a "$SCRATCH_DIR/models/" "$OUTPUT_DIR/models/"
+fi
+# Flyt log-filer og database med tilbage
+[ -f "$SCRATCH_DIR/training_execution.log" ] && cp "$SCRATCH_DIR/training_execution.log" "$SUBMISSION_DIR/logs/job_${SLURM_JOB_ID}_execution.log"
+[ -f "$SCRATCH_DIR/tuning_meta/optuna_study.db" ] && rsync -a "$SCRATCH_DIR/tuning_meta/" "$OUTPUT_DIR/tuning_meta/" 2>/dev/null || true
 
 exit $JOB_STATUS
