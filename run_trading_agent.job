@@ -3,8 +3,8 @@
 #SBATCH --output=logs/agent_%j.out
 #SBATCH --error=logs/agent_%j.err
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=10                # Svarer til (n_envs + 2) i dine sub-miljøer
-#SBATCH --gres=gpu:a30:1                  # Allokerer præcis 1 fysisk GPU
+#SBATCH --cpus-per-task=40                # 20 CPU-kerner pr. GPU (16 train envs + 4 eval envs)
+#SBATCH --gres=gpu:a30:2                  # 2 GPU'er = 2 modeller parallelt via max_workers=num_gpus
 #SBATCH --time=23:59:00                   # Overholder den hårde 24t grænsen
 #SBATCH --partition=acltr                 # Høj-prioritets accelerator partition
 
