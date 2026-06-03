@@ -6,6 +6,7 @@
 #SBATCH --cpus-per-task=40                # 20 CPU-kerner pr. GPU (16 train envs + 4 eval envs)
 #SBATCH --gres=gpu:a30:2                  # 2 GPU'er = 2 modeller parallelt via max_workers=num_gpus
 #SBATCH --time=23:59:00                   # Overholder den hårde 24t grænsen
+#SBATCH --signal=TERM@120                 # Send SIGTERM 2 min før deadline → giver tid til emergency_sync
 #SBATCH --partition=acltr                 # Høj-prioritets accelerator partition
 
 # 1. HPC TMPDIR-Hygiejne (Omdirigeret til en isoleret bruger-mappe på lokal disk)
@@ -42,6 +43,7 @@ emergency_sync() {
         rsync -a "$SCRATCH_DIR/tuning_meta/" "$OUTPUT_DIR/tuning_meta/" 2>/dev/null || true
     fi
     [ -f "$SCRATCH_DIR/best_hyperparams.txt" ] && cp "$SCRATCH_DIR/best_hyperparams.txt" "$OUTPUT_DIR/" 2>/dev/null || true
+    [ -f "$SCRATCH_DIR/training_execution.log" ] && cp "$SCRATCH_DIR/training_execution.log" "$SUBMISSION_DIR/logs/job_${SLURM_JOB_ID}_execution.log" 2>/dev/null || true
     cleanup
     exit 1
 }
