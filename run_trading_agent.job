@@ -3,13 +3,13 @@
 #SBATCH --output=logs/agent_%j.out
 #SBATCH --error=logs/agent_%j.err
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=20                # 20 CPU-kerner pr. GPU (16 train envs + 4 eval envs)
-#SBATCH --gres=gpu:a30:1                 # 2 GPU'er = 2 modeller parallelt via max_workers=num_gpus
+#SBATCH --cpus-per-task=40                # 20 CPU-kerner pr. GPU (16 train envs + 4 eval envs)
+#SBATCH --gres=gpu:a30:2                  # 2 GPU'er = 2 modeller parallelt via max_workers=num_gpus
 #SBATCH --time=23:59:00                   # Overholder den hårde 24t grænsen
-#SBATCH --signal=TERM@120                 # Send SIGTERM 2 min før deadline → giver tid til emergency_sync
+#SBATCH --signal=B:TERM@120               # Send SIGTERM KUN til bash 2 min før deadline
 #SBATCH --partition=acltr                 # Høj-prioritets accelerator partition
 
-# 1. HPC TMPDIR-Hygiejne (Omdirigeret til en isoleret bruger-mappe på lokal disk)
+# 1. HPC TMPDIR-Hygiejne
 echo "[QuantForge] Konfigurerer lokalt TMPDIR under /tmp..."
 LOCAL_USER_TMP="/tmp/${USER}_hpc_jobs"
 mkdir -p "$LOCAL_USER_TMP"
@@ -25,7 +25,6 @@ SUBMISSION_DIR="${SLURM_SUBMIT_DIR}"
 SCRATCH_DIR="/tmp/${USER}_job_${SLURM_JOB_ID}"
 OUTPUT_DIR="${SUBMISSION_DIR}/results"
 
-# Sikrer at alle output-kataloger eksisterer på netværksdrevet før start
 mkdir -p "$OUTPUT_DIR/models"
 mkdir -p "$OUTPUT_DIR/tuning_meta"
 mkdir -p "${SUBMISSION_DIR}/logs"
@@ -33,9 +32,12 @@ mkdir -p "${SUBMISSION_DIR}/logs"
 echo "[QuantForge] Initierer job på host: $(hostname) med $SLURM_CPUS_PER_TASK allokerede kerner."
 echo "[QuantForge] Bruger dedikeret job-storage: $SCRATCH_DIR"
 
-# 3. Safe Cleanup Trap med Sync-Før-Delete
-emergency_sync() {
-    echo "[QuantForge] SIGNAL MODTAGET: Synkroniserer delvise checkpoints og tuning-state..."
+# 3. PID-variabel til Python-processen (sættes senere)
+PYTHON_PID=""
+
+# Sync-funktion: kopierer alt vigtigt fra scratch til permanent storage
+sync_results() {
+    echo "[QuantForge] Synkroniserer resultater til permanent storage..."
     if [ -d "$SCRATCH_DIR/models" ]; then
         rsync -a "$SCRATCH_DIR/models/" "$OUTPUT_DIR/models/" 2>/dev/null || true
     fi
@@ -44,6 +46,18 @@ emergency_sync() {
     fi
     [ -f "$SCRATCH_DIR/best_hyperparams.txt" ] && cp "$SCRATCH_DIR/best_hyperparams.txt" "$OUTPUT_DIR/" 2>/dev/null || true
     [ -f "$SCRATCH_DIR/training_execution.log" ] && cp "$SCRATCH_DIR/training_execution.log" "$SUBMISSION_DIR/logs/job_${SLURM_JOB_ID}_execution.log" 2>/dev/null || true
+}
+
+# SIGTERM handler: dræb Python, sync, ryd op
+emergency_sync() {
+    echo "[QuantForge] SIGTERM MODTAGET: Stopper træning og gemmer fremskridt..."
+    # Dræb Python-processen og alle dens børneprocesser
+    if [ -n "$PYTHON_PID" ]; then
+        kill -TERM "$PYTHON_PID" 2>/dev/null
+        wait "$PYTHON_PID" 2>/dev/null
+    fi
+    sync_results
+    echo "[QuantForge] Nødsynkronisering afsluttet."
     cleanup
     exit 1
 }
@@ -58,12 +72,12 @@ cleanup() {
 trap emergency_sync TERM INT
 trap cleanup EXIT
 
-# 4. Optimeret Data Staging (Nu på det sikre /tmp drev)
+# 4. Optimeret Data Staging
 mkdir -p "$SCRATCH_DIR"
 echo "[QuantForge] Stager kildekode til hurtig lokal storage..."
 rsync -a --exclude='.git' --exclude='Backup/' --exclude='logs/' --exclude='results/' "${SUBMISSION_DIR}/" "$SCRATCH_DIR/"
 
-# Gendan tidligere resultater (modeller, checkpoints, Optuna DB) til scratch for resume
+# Gendan tidligere resultater for resume
 if [ -d "$OUTPUT_DIR/models" ]; then
     echo "[QuantForge] Gendanner tidligere model-checkpoints for resume..."
     rsync -a "$OUTPUT_DIR/models/" "$SCRATCH_DIR/models/" 2>/dev/null || true
@@ -77,30 +91,26 @@ fi
 
 cd "$SCRATCH_DIR" || exit 1
 
-# 5. Virtual Env over cluster-toolchain
+# 5. Virtual Env
 echo "[QuantForge] Bygger virtual environment..."
 python3 -m venv --system-site-packages hpc_env
 source hpc_env/bin/activate
 
 pip install --quiet --upgrade pip
-
 echo "[QuantForge] Installerer projektafhængigheder..."
 pip install --quiet --no-cache-dir -r requirements.txt
 
-# 6. Eksekver Agent Pipeline
+# 6. Eksekver Agent Pipeline I BAGGRUNDEN (så bash kan modtage SIGTERM via trap)
 echo "[QuantForge] Starter fejltolerant trænings-pipeline..."
-python3 main.py > training_execution.log 2>&1
+python3 main.py > training_execution.log 2>&1 &
+PYTHON_PID=$!
+
+# wait er interruptible af signals — dette er NØGLEN til at emergency_sync kan køre
+wait $PYTHON_PID
 JOB_STATUS=$?
 
-# 7. Endelig Stage-Out
-echo "[QuantForge] Job fuldført med status $JOB_STATUS. Synkroniserer artifacts til permanent storage..."
-if [ -d "$SCRATCH_DIR/models" ]; then
-    rsync -a "$SCRATCH_DIR/models/" "$OUTPUT_DIR/models/"
-fi
-if [ -d "$SCRATCH_DIR/tuning_meta" ]; then
-    rsync -a "$SCRATCH_DIR/tuning_meta/" "$OUTPUT_DIR/tuning_meta/" 2>/dev/null || true
-fi
-[ -f "$SCRATCH_DIR/best_hyperparams.txt" ] && cp "$SCRATCH_DIR/best_hyperparams.txt" "$OUTPUT_DIR/" 2>/dev/null || true
-[ -f "$SCRATCH_DIR/training_execution.log" ] && cp "$SCRATCH_DIR/training_execution.log" "$SUBMISSION_DIR/logs/job_${SLURM_JOB_ID}_execution.log"
+# 7. Normal Stage-Out (kun nået hvis Python afsluttede selv, ikke via timeout)
+echo "[QuantForge] Job fuldført med status $JOB_STATUS. Synkroniserer artifacts..."
+sync_results
 
 exit $JOB_STATUS
